@@ -267,11 +267,15 @@ export const foreshadowingApi = {
 // Idea
 export interface Idea {
   id: string
-  projectId: string
+  projectId: string | null  // null = global idea
   title: string
   description: string | null
   category: string | null
   linkedEntities: Array<{ entityId: string; entityType: string }> | string | null
+  isUsed: number  // 0 = unused, 1 = used
+  reuseCount: number
+  deviationFactor: number  // 0-100
+  inspirationFor: Array<{ type: string; id: string; createdAt: string }> | null
   createdAt: string
   updatedAt: string
 }
@@ -282,18 +286,34 @@ export const ideasApi = {
     return response.data
   },
 
+  async listGlobal(): Promise<Idea[]> {
+    const response = await apiClient.get('/ideas')
+    return response.data
+  },
+
   async get(projectId: string, id: string): Promise<Idea> {
     const response = await apiClient.get(`/projects/${projectId}/ideas/${id}`)
     return response.data
   },
 
-  async create(projectId: string, data: Partial<Idea>): Promise<Idea> {
-    const response = await apiClient.post(`/projects/${projectId}/ideas`, data)
+  async create(projectId: string, data: Partial<Idea> & { isGlobal?: boolean }): Promise<Idea> {
+    const endpoint = data.isGlobal ? '/ideas' : `/projects/${projectId}/ideas`
+    const response = await apiClient.post(endpoint, data)
     return response.data
   },
 
   async update(projectId: string, id: string, data: Partial<Idea>): Promise<Idea> {
     const response = await apiClient.put(`/projects/${projectId}/ideas/${id}`, data)
+    return response.data
+  },
+
+  async toggleUsed(id: string): Promise<Idea> {
+    const response = await apiClient.post(`/ideas/${id}/toggle-used`)
+    return response.data
+  },
+
+  async updateDeviation(id: string, deviationFactor: number): Promise<Idea> {
+    const response = await apiClient.put(`/ideas/${id}/deviation`, { deviationFactor })
     return response.data
   },
 
