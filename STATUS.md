@@ -1,19 +1,19 @@
 # Chronicle — Development Status
 
-**Last Updated:** March 20, 2026
+**Last Updated:** March 21, 2026
 
 ---
 
-## ✅ ALL PHASES COMPLETE!
+## ✅ ALL CORE PHASES COMPLETE!
 
 ### Phase 1 — Scaffold & Infrastructure (COMPLETE)
 - [x] Client with Vite + React + TypeScript + Tailwind
 - [x] Server with Express + TypeScript
-- [x] Drizzle ORM with SQLite
+- [x] Drizzle ORM with SQLite (PostgreSQL-ready)
 - [x] Schema defined (all tables)
 - [x] Migrations run
-- [x] CacheService (lru-cache)
-- [x] LLMService (Ollama)
+- [x] CacheService (lru-cache, Redis-ready)
+- [x] LLMService (Ollama with streaming)
 - [x] Health check and LLM ping routes
 - [x] Project CRUD
 - [x] React Query + axios setup
@@ -31,11 +31,16 @@
 - [x] Plot Arc CRUD
 - [x] Plot Thread CRUD
 - [x] Foreshadowing Ledger
-- [x] Idea CRUD + Idea board view (kanban)
+- [x] Idea CRUD + Idea board view (kanban + list)
 - [x] Linking ideas to KB elements (characters, locations, lore)
 - [x] LLM World Generator
 - [x] LLM Consistency Validator
 - [x] Cross-reference auto-linking (entity highlighting in lore)
+- [x] **Ideas-driven LLM generation** - Ideas influence KB generation
+- [x] **Global/Project ideas** - Top-level ideas available across projects
+- [x] **Idea reuse tracking** - Track how many times ideas are used
+- [x] **Idea deviation factor** - Control creative freedom (0-100%)
+- [x] **Idea inspiration history** - Track what each idea inspired
 
 ### Phase 3 — Style Module (COMPLETE)
 - [x] Style Profile table in schema
@@ -52,18 +57,23 @@
 - [x] Chapter versioning (save multiple versions)
 - [x] StateSnapshot table + API routes
 - [x] CharacterState + LocationState tables + routes
-- [x] State snapshot form (manual entry)
+- [x] State snapshot form (LLM-assisted + manual entry)
 - [x] Chapter status flow (OUTLINE → DRAFT → STYLE → REVIEW → FINAL)
+- [x] **KB Evolution** - Automatic KB updates from chapter content
+- [x] **Version history tracking** - Track KB changes over time
 - [ ] KB diff viewer (deferred to enhancements)
 - [ ] Event Timeline view (deferred to enhancements)
 
 ### Phase 5 — Context Assembly Engine (COMPLETE)
 - [x] ContextAssemblyEngine service
 - [x] Tiered context model (Tier 1-4)
-- [x] Token budget management
+- [x] Token budget management (env-configurable)
 - [x] Text compression for long entries
 - [x] Context preview API endpoint
-- [x] Prompt templates (10 templates)
+- [x] Prompt templates (11 templates)
+- [x] **Ideas integration** - Ideas included in context assembly
+- [x] **State snapshot integration** - Recent chapters influence context
+- [x] **Configurable recency** - Author controls how many chapters considered
 
 ### Phase 6 — Chapter Generation Pipeline (COMPLETE)
 - [x] Chapter list view + create chapter UI
@@ -78,6 +88,8 @@
 - [x] Version history drawer
 - [x] Entity extraction post-generation
 - [x] SSE streaming endpoints
+- [x] **Auto-snapshot on finalize** - KB evolution triggered automatically
+- [x] **Min word count setting** - Default chapter length per project
 
 ### Phase 7 — Consistency & Quality Engine (COMPLETE)
 - [x] Fact Checker via LLM
@@ -96,6 +108,10 @@
 - [x] Writing session tracking (via timestamps)
 - [x] Style drift chart (in StyleProfileEditor)
 - [x] Plot thread status dashboard
+- [x] **Home page** - Landing page with features and recent projects
+- [x] **Projects page** - Table view with toggle create form
+- [x] **Dark mode** - Full dark mode support across all pages
+- [x] **Status badges** - All badges work in dark mode
 
 ### Phase 9 — Export Module (COMPLETE)
 - [x] Export service using docx package
@@ -110,9 +126,82 @@
 - [x] Story Bible Generator
 - [x] Dark mode toggle
 - [x] Keyboard shortcuts (browser native)
+- [x] **Configurable context size** - Author controls token budget
+- [x] **Snapshot size settings** - Min/max recent chapters
 - [ ] Character Interview Mode (deferred to enhancements)
 - [ ] Scene Variants (deferred to enhancements)
 - [ ] Prompt Template Editor (deferred - templates are .md files)
+
+---
+
+## 🔧 Enhancement Module (Deferred Items)
+
+These items can be implemented as future enhancements:
+
+### From Core Phases
+- [x] **Event Timeline View** - Chronological visualization of story events (COMPLETE!)
+- [ ] **KB Diff Viewer** - Visual comparison of story state between chapters
+- [ ] **PDF Export** - Using pdfkit package
+- [ ] **EPUB Export** - Using epub package
+- [ ] **Character Interview Mode** - Conversational UI with LLM as character
+- [ ] **Scene Variants** - Generate multiple tonal variants
+- [ ] **Prompt Template Editor UI** - Web UI for editing .md templates
+
+### Additional Enhancements
+- [ ] **Relationship graph improvements** - Filtering, zoom controls, drag persistence
+- [ ] **Idea board drag-and-drop** - Move ideas between categories
+- [ ] **Style profile templates** - Pre-built profiles (Hemingway, Lovecraft, etc.)
+- [ ] **Chapter outline generator** - AI-generated outline from story arc
+- [ ] **Backup/Restore** - Export entire project as JSON
+- [ ] **Project templates** - Fantasy, sci-fi, romance presets
+- [ ] **Mobile responsive** - Optimize for tablets/phones
+- [ ] **PWA support** - Install as desktop/mobile app
+- [ ] **User authentication** - Multi-user support
+- [ ] **Cloud sync** - Sync projects across devices
+
+---
+
+## Technical Debt / Known Issues
+
+1. **Token counting** - Using character-based estimate (1 token ≈ 4 chars). Consider `tiktoken` for accuracy.
+2. **LLM pre-fill for snapshots** - State snapshot form uses LLM but could be more intelligent.
+3. **No authentication** - All routes are open. Add auth before deployment.
+4. **No rate limiting** - Add rate limiting to prevent abuse.
+5. **Streaming error handling** - SSE streams could have better error recovery.
+6. **Large file uploads** - Style sample uploads may timeout for large files.
+7. **node-fetch types** - Using inline type declaration; consider proper @types package.
+
+---
+
+## Recent Additions (v1.0)
+
+### Ideas System Enhancement
+- Ideas can be **global** (available across all projects) or **project-specific**
+- Ideas are **automatically fetched and used** during KB generation
+- **Reuse tracking** - See how many times each idea has been used
+- **Deviation factor** (0-100%) - Control how creatively the LLM interprets ideas
+- **Inspiration history** - Track what each idea has inspired
+
+### Knowledge Bank Evolution
+- **Automatic KB updates** when finalizing chapters
+- LLM analyzes chapter content for new discoveries
+- Updates merged with timestamps into existing KB entries
+- **Version history** tracks all KB changes
+- Categories: History, Cosmology, Geography, Politics, Culture, Magic/Tech
+
+### Context & Generation Improvements
+- **Configurable token budget** via environment variables
+- **Snapshot size settings** - Control min/max recent chapters
+- **Min word count per chapter** - Default chapter length setting
+- **Ideas in context** - Ideas influence chapter generation
+- **Progressive story state** - Previous chapters influence new content
+
+### UX Improvements
+- **Home page** - Welcome screen with features and recent projects
+- **Projects page** - Clean table view with toggle create form
+- **Full dark mode** - All pages and components support dark mode
+- **Status badges** - All badges properly styled for dark mode
+- **Used/Unused toggle** - Mark ideas as used manually
 
 ---
 
