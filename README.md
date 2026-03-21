@@ -113,30 +113,54 @@ ollama pull llama3.1:8b
 ### 4. Initialize Database
 
 ```bash
-cd server
-npx drizzle-kit generate
-npx drizzle-kit migrate
+npm run db:generate
+npm run db:migrate
 ```
 
 ### 5. Start Development Servers
 
-**Terminal 1 - Server:**
+**Option A - Single command (recommended):**
 ```bash
-cd server
 npm run dev
+```
+This starts both server and client concurrently.
+
+**Option B - Separate terminals:**
+
+Terminal 1 - Server:
+```bash
+npm run dev:server
 ```
 Server starts on http://localhost:3001
 
-**Terminal 2 - Client:**
+Terminal 2 - Client:
 ```bash
-cd client
-npm run dev
+npm run dev:client
 ```
 Client starts on http://localhost:5173
 
 ### 6. Open in Browser
 
 Navigate to http://localhost:5173
+
+---
+
+## Root-Level Scripts
+
+The project includes convenient scripts in the root `package.json` for managing both client and server:
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start both server and client concurrently (development) |
+| `npm run dev:server` | Start server only (development) |
+| `npm run dev:client` | Start client only (development) |
+| `npm run build` | Build both server and client for production |
+| `npm run build:server` | Build server only |
+| `npm run build:client` | Build client only |
+| `npm run start:server` | Start server in production mode |
+| `npm run db:generate` | Generate database migrations from schema |
+| `npm run db:migrate` | Apply database migrations |
+| `npm run db:studio` | Open Drizzle Kit database explorer |
 
 ---
 
@@ -342,22 +366,38 @@ POST /api/llm/ping   - Test LLM connection
 
 ## Development Commands
 
-### Server
+**From the root directory:**
+
+```bash
+npm run dev           # Start both server and client concurrently
+npm run dev:server    # Start server only (hot reload)
+npm run dev:client    # Start client only (Vite dev server)
+npm run build         # Build both for production
+npm run build:server  # Build server only
+npm run build:client  # Build client only
+npm run start:server  # Start server in production mode
+npm run db:generate   # Generate database migrations
+npm run db:migrate    # Apply database migrations
+npm run db:studio     # Open Drizzle Kit database explorer
+```
+
+**From individual directories:**
+
+Server (`cd server`):
 ```bash
 npm run dev      # Start with hot reload
 npm run build    # Build for production
 npm run start    # Start production server
-npm run migrate  # Run database migrations
 ```
 
-### Client
+Client (`cd client`):
 ```bash
 npm run dev      # Start Vite dev server
 npm run build    # Build for production
 npm run preview  # Preview production build
 ```
 
-### Database
+Database (`cd server`):
 ```bash
 npx drizzle-kit generate  # Generate migration from schema
 npx drizzle-kit migrate   # Apply migrations
