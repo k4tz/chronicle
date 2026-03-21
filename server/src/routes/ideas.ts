@@ -1,27 +1,63 @@
 // server/src/routes/ideas.ts
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
-import { db, eq } from '../db'
+import { db, eq, or, isNull } from '../db'
 import { ideas } from '../db/schema'
+import { ideasService } from '../services/ideasService'
 
 const router = Router()
 
-// GET /api/projects/:projectId/ideas - List all ideas
+// GET /api/projects/:projectId/ideas - List all ideas (project-specific + global)
 router.get('/projects/:projectId/ideas', async (req, res) => {
   try {
     const result = await db
       .select()
       .from(ideas)
-      .where(eq(ideas.projectId, req.params.projectId))
+      .where(
+        or(
+          eq(ideas.projectId, req.params.projectId),
+          isNull(ideas.projectId)  // Global ideas
+        )
+      )
       .all()
-    res.json(result)
+    
+    // Parse linked entities and inspirationFor
+    const parsed = result.map(idea => ({
+      ...idea,
+      linkedEntities: idea.linkedEntities ? JSON.parse(idea.linkedEntities) : null,
+      inspirationFor: idea.inspirationFor ? JSON.parse(idea.inspirationFor) : null,
+    }))
+    
+    res.json(parsed)
   } catch (error) {
     console.error('Error fetching ideas:', error)
     res.status(500).json({ error: 'Failed to fetch ideas' })
   }
 })
 
-// POST /api/projects/:projectId/ideas - Create a new idea
+// GET /api/ideas - List all global ideas (top-level)
+router.get('/ideas', async (req, res) => {
+  try {
+    const result = await db
+      .select()
+      .from(ideas)
+      .where(isNull(ideas.projectId))
+      .all()
+    
+    const parsed = result.map(idea => ({
+      ...idea,
+      linkedEntities: idea.linkedEntities ? JSON.parse(idea.linkedEntities) : null,
+      inspirationFor: idea.inspirationFor ? JSON.parse(idea.inspirationFor) : null,
+    }))
+    
+    res.json(parsed)
+  } catch (error) {
+    console.error('Error fetching global ideas:', error)
+    res.status(500).json({ error: 'Failed to fetch global ideas' })
+  }
+})
+
+// POST /api/projects/:projectId/ideas - Create a new idea (project-specific or global)
 router.post('/projects/:projectId/ideas', async (req, res) => {
   try {
     const { projectId } = req.params
@@ -29,27 +65,48 @@ router.post('/projects/:projectId/ideas', async (req, res) => {
     const now = new Date().toISOString()
     const id = nanoid()
 
-    await db.insert(ideas).values({
-      id,
-      projectId,
+    const idea = await ideasService.createIdea({
+      projectId: data.isGlobal ? null : projectId,
       title: data.title,
-      description: data.description || null,
-      category: data.category || null,
-      linkedEntities: data.linkedEntities ? JSON.stringify(data.linkedEntities) : null,
-      createdAt: now,
-      updatedAt: now,
+      description: data.description,
+      category: data.category,
+      linkedEntities: data.linkedEntities,
     })
 
-    const result = await db
-      .select()
-      .from(ideas)
-      .where(eq(ideas.id, id))
-      .get()
-
-    res.json(result)
+    res.json({
+      ...idea,
+      linkedEntities: idea.linkedEntities ? JSON.parse(idea.linkedEntities) : null,
+      inspirationFor: null,
+    })
   } catch (error) {
     console.error('Error creating idea:', error)
     res.status(500).json({ error: 'Failed to create idea' })
+  }
+})
+
+// POST /api/ideas - Create a new global idea
+router.post('/ideas', async (req, res) => {
+  try {
+    const data = req.body
+    const now = new Date().toISOString()
+    const id = nanoid()
+
+    const idea = await ideasService.createIdea({
+      projectId: null,  // Global idea
+      title: data.title,
+      description: data.description,
+      category: data.category,
+      linkedEntities: data.linkedEntities,
+    })
+
+    res.json({
+      ...idea,
+      linkedEntities: idea.linkedEntities ? JSON.parse(idea.linkedEntities) : null,
+      inspirationFor: null,
+    })
+  } catch (error) {
+    console.error('Error creating global idea:', error)
+    res.status(500).json({ error: 'Failed to create global idea' })
   }
 })
 
@@ -84,24 +141,14 @@ router.put('/projects/:projectId/ideas/:ideaId', async (req, res) => {
   try {
     const { ideaId } = req.params
     const data = req.body
-    const now = new Date().toISOString()
 
-    await db
-      .update(ideas)
-      .set({
-        title: data.title,
-        description: data.description || null,
-        category: data.category || null,
-        linkedEntities: data.linkedEntities ? JSON.stringify(data.linkedEntities) : null,
-        updatedAt: now,
-      })
-      .where(eq(ideas.id, ideaId))
-
-    const result = await db
-      .select()
-      .from(ideas)
-      .where(eq(ideas.id, ideaId))
-      .get()
+    const result = await ideasService.updateIdea(ideaId, {
+      title: data.title,
+      description: data.description,
+      category: data.category,
+      linkedEntities: data.linkedEntities,
+      deviationFactor: data.deviationFactor,
+    })
 
     if (!result) {
       return res.status(404).json({ error: 'Idea not found' })
@@ -110,10 +157,59 @@ router.put('/projects/:projectId/ideas/:ideaId', async (req, res) => {
     res.json({
       ...result,
       linkedEntities: result.linkedEntities ? JSON.parse(result.linkedEntities) : null,
+      inspirationFor: result.inspirationFor ? JSON.parse(result.inspirationFor) : null,
     })
   } catch (error) {
     console.error('Error updating idea:', error)
     res.status(500).json({ error: 'Failed to update idea' })
+  }
+})
+
+// POST /api/ideas/:ideaId/toggle-used - Toggle idea used status
+router.post('/ideas/:ideaId/toggle-used', async (req, res) => {
+  try {
+    const { ideaId } = req.params
+    const result = await ideasService.toggleIdeaUsed(ideaId)
+
+    if (!result) {
+      return res.status(404).json({ error: 'Idea not found' })
+    }
+
+    res.json({
+      ...result,
+      linkedEntities: result.linkedEntities ? JSON.parse(result.linkedEntities) : null,
+      inspirationFor: result.inspirationFor ? JSON.parse(result.inspirationFor) : null,
+    })
+  } catch (error) {
+    console.error('Error toggling idea status:', error)
+    res.status(500).json({ error: 'Failed to toggle idea status' })
+  }
+})
+
+// PUT /api/ideas/:ideaId/deviation - Update idea deviation factor
+router.put('/ideas/:ideaId/deviation', async (req, res) => {
+  try {
+    const { ideaId } = req.params
+    const { deviationFactor } = req.body
+
+    if (deviationFactor === undefined) {
+      return res.status(400).json({ error: 'deviationFactor required' })
+    }
+
+    const result = await ideasService.updateDeviationFactor(ideaId, deviationFactor)
+
+    if (!result) {
+      return res.status(404).json({ error: 'Idea not found' })
+    }
+
+    res.json({
+      ...result,
+      linkedEntities: result.linkedEntities ? JSON.parse(result.linkedEntities) : null,
+      inspirationFor: result.inspirationFor ? JSON.parse(result.inspirationFor) : null,
+    })
+  } catch (error) {
+    console.error('Error updating deviation factor:', error)
+    res.status(500).json({ error: 'Failed to update deviation factor' })
   }
 })
 

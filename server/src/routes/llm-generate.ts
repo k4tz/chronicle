@@ -1,6 +1,7 @@
 // server/src/routes/llm-generate.ts
 import { Router } from 'express'
 import { OllamaService } from '../services/llmService'
+import { ideasService } from '../services/ideasService'
 import { db, eq } from '../db'
 import { worldFoundations, characters, locations } from '../db/schema'
 import { nanoid } from 'nanoid'
@@ -67,14 +68,27 @@ router.post('/projects/:projectId/generate/world', async (req, res) => {
 
     if (!seed) return res.status(400).json({ error: 'Seed concept required' })
 
+    // Fetch relevant ideas for world generation
+    const worldIdeas = await ideasService.getIdeasForCategory(projectId, 'world')
+    const cosmologyIdeas = await ideasService.getIdeasForCategory(projectId, 'cosmology')
+    const historyIdeas = await ideasService.getIdeasForCategory(projectId, 'history')
+    
+    // Build ideas context
+    const allWorldIdeas = [...worldIdeas, ...cosmologyIdeas, ...historyIdeas]
+    const ideasContext = allWorldIdeas.length > 0 
+      ? ideasService.formatIdeasForPrompt(allWorldIdeas)
+      : ''
+
     const systemPrompt = `Generate a detailed world for a novel. Return ONLY valid JSON with no other text:
 {"cosmology":"string","history":"string","geography":"string","politicalLandscape":"string","economy":"string","culture":"string","magicOrTechRules":"string"}
 
 Important: Do not include any thinking, reasoning, or explanation. Only output the JSON object.`
 
+    const userPrompt = `Create a world based on: ${seed}${ideasContext ? '\n\n' + ideasContext : ''}`
+
     const response = await llmService.complete({
       systemPrompt,
-      userPrompt: `Create a world based on: ${seed}`,
+      userPrompt,
       maxTokens: 4000,
       temperature: 0.8,
     })
@@ -107,7 +121,12 @@ Important: Do not include any thinking, reasoning, or explanation. Only output t
       })
     }
 
-    res.json({ success: true, world: worldData })
+    // Mark ideas as used
+    for (const idea of allWorldIdeas) {
+      await ideasService.markIdeaAsUsed(idea.id, { type: 'world', id: existing?.id || 'new' })
+    }
+
+    res.json({ success: true, world: worldData, ideasUsed: allWorldIdeas.length })
   } catch (error) {
     console.error('Error generating world:', error)
     const errorMsg = error instanceof Error ? error.message : String(error)
@@ -123,14 +142,29 @@ router.post('/projects/:projectId/generate/character', async (req, res) => {
 
     if (!role) return res.status(400).json({ error: 'Character role required' })
 
+    // Fetch relevant ideas for character generation
+    const characterIdeas = await ideasService.getIdeasForCategory(projectId, 'character')
+    const plotIdeas = await ideasService.getIdeasForCategory(projectId, 'plot')
+    
+    // Build ideas context
+    const allCharacterIdeas = [...characterIdeas, ...plotIdeas.slice(0, 3)]
+    const ideasContext = allCharacterIdeas.length > 0 
+      ? ideasService.formatIdeasForPrompt(allCharacterIdeas)
+      : ''
+
     const systemPrompt = `Output ONLY valid JSON. No other text. No markdown. No explanations.
 
 JSON format (all strings):
 {"name":"","aliases":"","appearance":"","background":"","personality":"","motivation":"","fears":"","secrets":"","abilities":"","flaws":"","speechPatterns":""}`
 
-    const userPrompt = `Create a ${role} character (archetype: ${archetype || 'custom'}, traits: ${traits || 'unique'}).
-Fantasy novel setting. Make them compelling with depth.
-All values must be strings (no arrays). Use commas for lists.`
+    let userPrompt = `Create a ${role} character (archetype: ${archetype || 'custom'}, traits: ${traits || 'unique'}).
+Fantasy novel setting. Make them compelling with depth.`
+
+    if (ideasContext) {
+      userPrompt += '\n\nIncorporate these creative ideas into the character:' + ideasContext
+    }
+
+    userPrompt += '\n\nAll values must be strings (no arrays). Use commas for lists.'
 
     // Retry logic for transient LLM failures
     let response: string
@@ -222,12 +256,17 @@ All values must be strings (no arrays). Use commas for lists.`
     })
 
     const created = await db.select().from(characters).where(eq(characters.id, id)).get()
-    
+
     if (!created) {
       throw new Error('Failed to retrieve created character')
     }
 
-    res.json({ success: true, character: created })
+    // Mark ideas as used
+    for (const idea of allCharacterIdeas) {
+      await ideasService.markIdeaAsUsed(idea.id, { type: 'character', id: created.id })
+    }
+
+    res.json({ success: true, character: created, ideasUsed: allCharacterIdeas.length })
   } catch (error) {
     console.error('Error generating character:', error)
     const errorMsg = error instanceof Error ? error.message : String(error)
@@ -243,14 +282,29 @@ router.post('/projects/:projectId/generate/location', async (req, res) => {
 
     if (!type) return res.status(400).json({ error: 'Location type required' })
 
+    // Fetch relevant ideas for location generation
+    const locationIdeas = await ideasService.getIdeasForCategory(projectId, 'location')
+    const worldIdeas = await ideasService.getIdeasForCategory(projectId, 'world')
+    
+    // Build ideas context
+    const allLocationIdeas = [...locationIdeas, ...worldIdeas.slice(0, 3)]
+    const ideasContext = allLocationIdeas.length > 0 
+      ? ideasService.formatIdeasForPrompt(allLocationIdeas)
+      : ''
+
     const systemPrompt = `Output ONLY valid JSON. No other text. No markdown. No explanations.
 
 JSON format (all strings):
 {"name":"","region":"","description":"","atmosphere":"","lore":"","currentState":""}`
 
-    const userPrompt = `Create a ${type} location (purpose: ${purpose || 'story setting'}, atmosphere: ${atmosphere || 'unique'}).
-Fantasy novel setting. Make it vivid and immersive.
-All values must be strings.`
+    let userPrompt = `Create a ${type} location (purpose: ${purpose || 'story setting'}, atmosphere: ${atmosphere || 'unique'}).
+Fantasy novel setting. Make it vivid and immersive.`
+
+    if (ideasContext) {
+      userPrompt += '\n\nIncorporate these creative ideas into the location:' + ideasContext
+    }
+
+    userPrompt += '\n\nAll values must be strings.'
 
     // Retry logic for transient LLM failures
     let response: string
@@ -337,12 +391,17 @@ All values must be strings.`
     })
 
     const created = await db.select().from(locations).where(eq(locations.id, id)).get()
-    
+
     if (!created) {
       throw new Error('Failed to retrieve created location')
     }
 
-    res.json({ success: true, location: created })
+    // Mark ideas as used
+    for (const idea of allLocationIdeas) {
+      await ideasService.markIdeaAsUsed(idea.id, { type: 'location', id: created.id })
+    }
+
+    res.json({ success: true, location: created, ideasUsed: allLocationIdeas.length })
   } catch (error) {
     console.error('Error generating location:', error)
     const errorMsg = error instanceof Error ? error.message : String(error)

@@ -127,11 +127,15 @@ export const foreshadowingEntries = sqliteTable('foreshadowing_entries', {
 
 export const ideas = sqliteTable('ideas', {
   id:             text('id').primaryKey(),
-  projectId:      text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  projectId:      text('project_id').references(() => projects.id, { onDelete: 'cascade' }), // null = global/top-level
   title:          text('title').notNull(),
   description:    text('description'),
-  category:       text('category'),                     // plot, character, world, theme, etc.
+  category:       text('category'),                     // plot, character, world, theme, location, cosmology, history, etc.
   linkedEntities: text('linked_entities'),              // JSON array: [{entityId, entityType}]
+  isUsed:         integer('is_used').notNull().default(0),  // 0 = unused, 1 = used
+  reuseCount:     integer('reuse_count').notNull().default(0),  // How many times this idea has been used
+  deviationFactor: integer('deviation_factor').notNull().default(0),  // 0-100, how much creative deviation to apply
+  inspirationFor: text('inspiration_for'),              // JSON array of what this idea inspired: [{type, id, createdAt}]
   createdAt:      text('created_at').notNull(),
   updatedAt:      text('updated_at').notNull(),
 })
