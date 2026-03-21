@@ -37,8 +37,23 @@ export interface ChapterContextConfig {
 }
 
 export class ContextAssemblyEngine {
-  private readonly TOKEN_BUDGET = 5000  // Leave room for generation
+  // Token budget calculated from environment variables
+  // Default: 8192 context window - 4096 headroom = 4096 tokens for context
+  private readonly TOKEN_BUDGET: number
   private readonly CHARS_PER_TOKEN = 4
+
+  constructor() {
+    // Read from environment or use defaults
+    const modelContextWindow = parseInt(process.env.MODEL_CONTEXT_WINDOW || '8192')
+    const generationHeadroom = parseInt(process.env.GENERATION_HEADROOM || '4096')
+    
+    // Calculate available tokens for context (with 20% safety buffer)
+    const availableTokens = modelContextWindow - generationHeadroom
+    this.TOKEN_BUDGET = Math.floor(availableTokens * 0.8) // 20% safety buffer
+    
+    // Ensure minimum budget of 2000 tokens
+    this.TOKEN_BUDGET = Math.max(2000, this.TOKEN_BUDGET)
+  }
 
   async assembleContext(
     projectId: string,
@@ -385,6 +400,11 @@ export class ContextAssemblyEngine {
       .all()
 
     return entries.filter(e => e.entityType === entityType || !entityId)
+  }
+
+  // Get current token budget (for debugging/logging)
+  getTokenBudget(): number {
+    return this.TOKEN_BUDGET
   }
 }
 

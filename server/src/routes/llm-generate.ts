@@ -8,6 +8,17 @@ import { nanoid } from 'nanoid'
 const router = Router()
 const llmService = new OllamaService()
 
+// GET /api/llm/config - Get LLM configuration including context sizes
+router.get('/llm/config', (req, res) => {
+  res.json({
+    provider: process.env.LLM_PROVIDER || 'ollama',
+    model: process.env.GENERATION_MODEL || 'llama-model',
+    contextWindow: parseInt(process.env.MODEL_CONTEXT_WINDOW || '8192'),
+    generationHeadroom: parseInt(process.env.GENERATION_HEADROOM || '4096'),
+    maxPredictTokens: Math.floor(parseInt(process.env.GENERATION_HEADROOM || '4096') * 0.9),
+  })
+})
+
 // Helper to extract JSON from LLM response (handles markdown code blocks)
 function extractJsonFromResponse(response: string): any {
   const trimmed = response.trim()

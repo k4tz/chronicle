@@ -34,10 +34,18 @@ function stripThinkingTags(text: string): string {
 export class OllamaService implements LLMService {
   private baseUrl: string
   private model: string
+  private maxPredictTokens: number
 
   constructor() {
     this.baseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
     this.model = process.env.GENERATION_MODEL || 'llama-model'
+    
+    // Calculate max tokens for generation based on environment
+    // This ensures we don't exceed the model's context window
+    const modelContextWindow = parseInt(process.env.MODEL_CONTEXT_WINDOW || '8192')
+    const generationHeadroom = parseInt(process.env.GENERATION_HEADROOM || '4096')
+    // Use headroom as the max prediction limit with 10% safety margin
+    this.maxPredictTokens = Math.floor(generationHeadroom * 0.9)
   }
 
   async *generate(req: GenerationRequest): AsyncGenerator<string> {
@@ -51,7 +59,7 @@ export class OllamaService implements LLMService {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: prompt,
-          n_predict: req.maxTokens || 512,
+          n_predict: req.maxTokens || this.maxPredictTokens,
           temperature: req.temperature ?? 0.7,
           stream: true,
         }),
