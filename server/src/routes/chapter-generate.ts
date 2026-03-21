@@ -3,7 +3,7 @@ import { Router } from 'express'
 import { OllamaService } from '../services/llmService'
 import { contextAssemblyEngine } from '../services/contextAssemblyEngine'
 import { db, eq } from '../db'
-import { chapters, chapterVersions, styleProfiles, characters, locations, stateSnapshots } from '../db/schema'
+import { chapters, chapterVersions, styleProfiles, characters, locations, stateSnapshots, projects } from '../db/schema'
 import { nanoid } from 'nanoid'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -398,7 +398,7 @@ router.post('/projects/:projectId/chapters/:chapterId/generate/snapshot', async 
     const prompt = substituteTemplate(template, {
       chapterNumber: chapter.number.toString(),
       chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      chapter,
+      chapter: '',
       prevWorldChanges: prevSnapshot ? JSON.parse(prevSnapshot.worldChanges || '[]').join('; ') : 'None yet',
       prevCanonFacts: prevSnapshot ? JSON.parse(prevSnapshot.newCanonFacts || '[]').join('; ') : 'None yet',
       characters: charNames || 'All characters in project',
@@ -584,7 +584,38 @@ router.post('/projects/:projectId/chapters/:chapterId/finalize', async (req, res
       .set({ status: 'final', updatedAt: new Date().toISOString() })
       .where(eq(chapters.id, chapterId))
 
-    res.json({ success: true, snapshot: extracted })
+    // === KB EVOLUTION: Analyze and update Knowledge Bank ===
+    let kbEvolutionResult = null
+    try {
+      const { kbService } = await import('../services/kbService.js')
+      const existingKB = await kbService.search(projectId, '')
+      
+      const updates = await kbService.analyzeChapterForKBUpdates(
+        projectId,
+        latestVersion.content,
+        chapter.number,
+        existingKB
+      )
+
+      if (updates.length > 0) {
+        const applyResult = await kbService.applyKBUpdates(
+          projectId,
+          updates,
+          chapterId,
+          chapter.number
+        )
+        kbEvolutionResult = { updatesFound: updates.length, ...applyResult }
+      }
+    } catch (kbError) {
+      console.error('KB evolution failed (non-fatal):', kbError)
+      // Don't fail the request if KB evolution fails
+    }
+
+    res.json({ 
+      success: true, 
+      snapshot: extracted,
+      kbEvolution: kbEvolutionResult,
+    })
   } catch (error) {
     console.error('Error finalizing chapter:', error)
     res.status(500).json({ error: 'Failed to finalize chapter' })

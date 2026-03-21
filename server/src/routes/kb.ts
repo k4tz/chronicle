@@ -87,4 +87,65 @@ router.get('/projects/:projectId/context', async (req, res) => {
   }
 })
 
+// POST /api/projects/:projectId/kb/evolve - Trigger KB evolution from chapter
+router.post('/projects/:projectId/kb/evolve', async (req, res) => {
+  try {
+    const { projectId } = req.params
+    const { chapterId, chapterNumber } = req.body
+
+    if (!chapterId || !chapterNumber) {
+      return res.status(400).json({ error: 'chapterId and chapterNumber required' })
+    }
+
+    // Get existing KB entries
+    const existingKB = await kbService.search(projectId, '')
+
+    // Get chapter content from request or fetch from DB
+    let chapterContent = req.body.content
+    
+    if (!chapterContent) {
+      // Would need to import chapters and chapterVersions schema to fetch
+      // For now, require content in request
+      return res.status(400).json({ error: 'Chapter content required' })
+    }
+
+    // Analyze chapter for KB updates
+    const updates = await kbService.analyzeChapterForKBUpdates(
+      projectId,
+      chapterContent,
+      chapterNumber,
+      existingKB
+    )
+
+    // Apply updates
+    const result = await kbService.applyKBUpdates(
+      projectId,
+      updates,
+      chapterId,
+      chapterNumber
+    )
+
+    res.json({
+      success: true,
+      updatesFound: updates.length,
+      ...result,
+      updates,
+    })
+  } catch (error) {
+    console.error('Error evolving KB:', error)
+    res.status(500).json({ error: 'Failed to evolve KB' })
+  }
+})
+
+// GET /api/kb/:entryId/history - Get version history for entry
+router.get('/kb/:entryId/history', async (req, res) => {
+  try {
+    const history = await kbService.getVersionHistory(req.params.entryId)
+    res.json(history)
+  } catch (error) {
+    console.error('Error fetching KB history:', error)
+    res.status(500).json({ error: 'Failed to fetch KB history' })
+  }
+})
+
 export const app = router

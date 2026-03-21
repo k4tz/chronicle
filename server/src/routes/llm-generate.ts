@@ -167,10 +167,10 @@ Fantasy novel setting. Make them compelling with depth.`
     userPrompt += '\n\nAll values must be strings (no arrays). Use commas for lists.'
 
     // Retry logic for transient LLM failures
-    let response: string
+    let response: string | undefined
     let lastError: Error | null = null
     const maxRetries = 3
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         response = await llmService.complete({
@@ -179,24 +179,28 @@ Fantasy novel setting. Make them compelling with depth.`
           maxTokens: 2500,
           temperature: 0.8,
         })
-        
+
         // Check if response is empty or whitespace only
         if (response && response.trim().length > 0) {
           break // Success
         }
-        
+
         lastError = new Error('Empty response from LLM')
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
         console.warn(`Character generation attempt ${attempt} failed:`, lastError.message)
-        
+
         if (attempt === maxRetries) {
           throw lastError
         }
-        
+
         // Wait before retry (exponential backoff)
         await new Promise(resolve => setTimeout(resolve, 500 * attempt))
       }
+    }
+
+    if (!response) {
+      throw lastError || new Error('No response from LLM')
     }
 
     const charData = extractJsonFromResponse(response)
@@ -307,10 +311,10 @@ Fantasy novel setting. Make it vivid and immersive.`
     userPrompt += '\n\nAll values must be strings.'
 
     // Retry logic for transient LLM failures
-    let response: string
+    let response: string | undefined
     let lastError: Error | null = null
     const maxRetries = 3
-    
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         response = await llmService.complete({
@@ -319,24 +323,28 @@ Fantasy novel setting. Make it vivid and immersive.`
           maxTokens: 2000,
           temperature: 0.8,
         })
-        
+
         // Check if response is empty or whitespace only
         if (response && response.trim().length > 0) {
           break // Success
         }
-        
+
         lastError = new Error('Empty response from LLM')
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
         console.warn(`Location generation attempt ${attempt} failed:`, lastError.message)
-        
+
         if (attempt === maxRetries) {
           throw lastError
         }
-        
+
         // Wait before retry (exponential backoff)
         await new Promise(resolve => setTimeout(resolve, 500 * attempt))
       }
+    }
+
+    if (!response) {
+      throw lastError || new Error('No response from LLM')
     }
 
     const locData = extractJsonFromResponse(response)

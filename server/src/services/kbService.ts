@@ -2,8 +2,36 @@
 import { db, eq } from '../db'
 import { kbEntries, projects } from '../db/schema'
 import { KBService, KBEntry, AssembledContext, ChapterContext } from '../types/services'
+import { OllamaService } from './llmService'
+import { nanoid } from 'nanoid'
+
+export interface KBUpdate {
+  entityType: string
+  entityId: string | null
+  field: string  // e.g., 'history', 'cosmology', 'description'
+  currentContent: string
+  newContent: string
+  reason: string
+  confidence: number  // 0-100
+}
+
+export interface KBVersion {
+  id: string
+  entryId: string
+  content: string
+  changeSummary: string
+  chapterId: string
+  chapterNumber: number
+  createdAt: string
+}
 
 export class KBServiceSQLite implements KBService {
+  private llmService: OllamaService
+
+  constructor() {
+    this.llmService = new OllamaService()
+  }
+
   async search(
     projectId: string,
     query: string,
@@ -109,6 +137,200 @@ export class KBServiceSQLite implements KBService {
 
       return this.toKBEntry(created!)
     }
+  }
+
+  /**
+   * Analyze chapter content and suggest KB updates
+   */
+  async analyzeChapterForKBUpdates(
+    projectId: string,
+    chapterContent: string,
+    chapterNumber: number,
+    existingKB: KBEntry[]
+  ): Promise<KBUpdate[]> {
+    // Get world foundation and other KB entries for context
+    const worldContext = existingKB
+      .filter(e => e.entityType === 'world')
+      .map(e => e.content)
+      .join('\n\n')
+
+    const prompt = `Analyze this chapter and identify new information that should update the Knowledge Bank.
+
+## Current World Context
+${worldContext.slice(0, 3000)}
+
+## Chapter ${chapterNumber} Content
+${chapterContent.slice(0, 8000)}
+
+## Task
+Identify new discoveries, revelations, or events that should update existing KB entries.
+
+Focus on:
+1. **History**: New historical facts discovered or revealed
+2. **Cosmology**: New understanding of how the world works, gods, magic systems
+3. **Geography**: New locations discovered or described
+4. **Politics**: Changes in power structures, alliances, conflicts
+5. **Culture**: New cultural practices, beliefs, or traditions revealed
+6. **Magic/Tech Rules**: New rules or limitations discovered
+
+## Output Format
+Return a JSON array of updates:
+[
+  {
+    "entityType": "world",
+    "entityId": null,
+    "field": "history",
+    "currentContent": "brief summary of current content",
+    "newContent": "specific new information to add",
+    "reason": "why this update is needed based on chapter events",
+    "confidence": 85
+  }
+]
+
+Only include updates with high confidence (70+). Be specific and concise.`
+
+    try {
+      const response = await this.llmService.complete({
+        systemPrompt: 'You are a lore keeper tracking story evolution. Return ONLY valid JSON array.',
+        userPrompt: prompt,
+        maxTokens: 3000,
+        temperature: 0.3,
+      })
+
+      // Extract JSON from response
+      const jsonMatch = response.match(/\[[\s\S]*\]/)
+      if (!jsonMatch) return []
+
+      const updates: KBUpdate[] = JSON.parse(jsonMatch[0])
+      return updates.filter(u => u.confidence >= 70)
+    } catch (error) {
+      console.error('Error analyzing chapter for KB updates:', error)
+      return []
+    }
+  }
+
+  /**
+   * Apply KB updates and create version history
+   */
+  async applyKBUpdates(
+    projectId: string,
+    updates: KBUpdate[],
+    chapterId: string,
+    chapterNumber: number
+  ): Promise<{ applied: number; skipped: number }> {
+    let applied = 0
+    let skipped = 0
+
+    for (const update of updates) {
+      try {
+        // Find existing entry
+        const existing = await db
+          .select()
+          .from(kbEntries)
+          .where(
+            eq(kbEntries.entityType, update.entityType)
+          )
+          .all()
+          .then(entries => entries.find(e => 
+            e.entityId === update.entityId || 
+            (e.entityId === null && update.entityId === null)
+          ))
+
+        if (!existing) {
+          // Create new entry for this field
+          const id = nanoid()
+          await db.insert(kbEntries).values({
+            id,
+            projectId,
+            layer: 'PERMANENT',
+            entityType: update.entityType,
+            entityId: update.entityId,
+            content: update.newContent,
+            compressedContent: null,
+            version: 1,
+            createdAt: new Date().toISOString(),
+          })
+          applied++
+          continue
+        }
+
+        // Merge new content with existing
+        const mergedContent = this.mergeKBContent(existing.content, update.newContent, update.field)
+
+        // Update entry
+        await db
+          .update(kbEntries)
+          .set({
+            content: mergedContent,
+            version: (existing.version || 1) + 1,
+          })
+          .where(eq(kbEntries.id, existing.id))
+
+        // Create version record
+        await db.insert(kbEntries).values({
+          id: nanoid(),
+          projectId,
+          layer: 'PROGRESSIVE',
+          entityType: `${update.entityType}_version`,
+          entityId: existing.id,
+          content: JSON.stringify({
+            previousContent: existing.content,
+            newContent: update.newContent,
+            reason: update.reason,
+            chapterNumber,
+          }),
+          compressedContent: null,
+          version: 1,
+          createdAt: new Date().toISOString(),
+        })
+
+        applied++
+      } catch (error) {
+        console.error('Error applying KB update:', error)
+        skipped++
+      }
+    }
+
+    return { applied, skipped }
+  }
+
+  /**
+   * Merge new content into existing KB entry
+   */
+  private mergeKBContent(existing: string, newContent: string, field: string): string {
+    // For structured fields, append new information
+    const timestamp = new Date().toISOString().split('T')[0]
+    
+    if (existing.includes('## Updates')) {
+      // Append to existing updates section
+      return `${existing}\n\n### ${timestamp}\n${newContent}`
+    } else {
+      // Add new updates section
+      return `${existing}\n\n## Updates\n\n### ${timestamp}\n${newContent}`
+    }
+  }
+
+  /**
+   * Get version history for a KB entry
+   */
+  async getVersionHistory(entryId: string): Promise<KBVersion[]> {
+    const versions = await db
+      .select()
+      .from(kbEntries)
+      .where(
+        eq(kbEntries.entityType, 'world_version')
+      )
+      .all()
+
+    return versions.map(v => ({
+      id: v.id,
+      entryId: v.entityId || '',
+      content: v.content,
+      changeSummary: v.content,
+      chapterId: '',
+      chapterNumber: 0,
+      createdAt: v.createdAt,
+    }))
   }
 
   async getActiveContext(

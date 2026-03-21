@@ -1,5 +1,5 @@
 // server/src/services/ideasService.ts
-import { db, eq, or, isNull } from '../db'
+import { db, eq } from '../db'
 import { ideas } from '../db/schema'
 import { nanoid } from 'nanoid'
 
@@ -33,23 +33,22 @@ export class IdeasService {
     const allIdeas = await db
       .select()
       .from(ideas)
-      .where(
-        or(
-          eq(ideas.projectId, projectId),
-          isNull(ideas.projectId)  // Global ideas
-        )
-      )
       .all()
 
+    // Filter to project-specific and global ideas
+    const relevantIdeas = allIdeas.filter(idea => 
+      idea.projectId === projectId || idea.projectId === null
+    )
+
     // Filter by category and sort: project-specific first, then global
-    const categoryIdeas = allIdeas.filter(idea => {
+    const categoryIdeas = relevantIdeas.filter(idea => {
       if (!idea.category) return false
       const ideaCategory = idea.category.toLowerCase()
       const searchCategory = category.toLowerCase()
-      
+
       // Direct match or related categories
       if (ideaCategory === searchCategory) return true
-      
+
       // Handle related categories
       const categoryMappings: Record<string, string[]> = {
         character: ['character', 'cast', 'protagonist', 'antagonist'],
@@ -60,7 +59,7 @@ export class IdeasService {
         plot: ['plot', 'story', 'narrative'],
         theme: ['theme', 'message', 'moral'],
       }
-      
+
       const relatedCategories = categoryMappings[searchCategory] || [searchCategory]
       return relatedCategories.includes(ideaCategory)
     })
@@ -70,7 +69,7 @@ export class IdeasService {
       // Project-specific ideas first
       if (a.projectId && !b.projectId) return -1
       if (!a.projectId && b.projectId) return 1
-      
+
       // Then by reuse count (prefer less used ideas)
       return a.reuseCount - b.reuseCount
     })
@@ -187,11 +186,13 @@ export class IdeasService {
       })
       .where(eq(ideas.id, ideaId))
 
-    return await db
+    const result = await db
       .select()
       .from(ideas)
       .where(eq(ideas.id, ideaId))
       .get()
+    
+    return result || null
   }
 
   /**
@@ -233,26 +234,20 @@ export class IdeasService {
    * Get all ideas for a project (including global)
    */
   async getAllIdeas(projectId?: string): Promise<IdeaRecord[]> {
+    const allIdeas = await db
+      .select()
+      .from(ideas)
+      .orderBy(ideas.createdAt)
+      .all()
+
     if (projectId) {
-      return await db
-        .select()
-        .from(ideas)
-        .where(
-          or(
-            eq(ideas.projectId, projectId),
-            isNull(ideas.projectId)
-          )
-        )
-        .orderBy(ideas.createdAt)
-        .all()
+      // Filter to project-specific and global ideas
+      return allIdeas.filter(idea => 
+        idea.projectId === projectId || idea.projectId === null
+      )
     } else {
       // Global ideas only
-      return await db
-        .select()
-        .from(ideas)
-        .where(isNull(ideas.projectId))
-        .orderBy(ideas.createdAt)
-        .all()
+      return allIdeas.filter(idea => idea.projectId === null)
     }
   }
 
@@ -294,11 +289,13 @@ export class IdeasService {
       .set(updateData)
       .where(eq(ideas.id, ideaId))
 
-    return await db
+    const result = await db
       .select()
       .from(ideas)
       .where(eq(ideas.id, ideaId))
       .get()
+    
+    return result || null
   }
 }
 

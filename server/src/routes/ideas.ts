@@ -1,7 +1,7 @@
 // server/src/routes/ideas.ts
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
-import { db, eq, or, isNull } from '../db'
+import { db, eq } from '../db'
 import { ideas } from '../db/schema'
 import { ideasService } from '../services/ideasService'
 
@@ -13,16 +13,15 @@ router.get('/projects/:projectId/ideas', async (req, res) => {
     const result = await db
       .select()
       .from(ideas)
-      .where(
-        or(
-          eq(ideas.projectId, req.params.projectId),
-          isNull(ideas.projectId)  // Global ideas
-        )
-      )
       .all()
     
+    // Filter to project-specific and global (null projectId)
+    const filtered = result.filter(idea => 
+      idea.projectId === req.params.projectId || idea.projectId === null
+    )
+    
     // Parse linked entities and inspirationFor
-    const parsed = result.map(idea => ({
+    const parsed = filtered.map(idea => ({
       ...idea,
       linkedEntities: idea.linkedEntities ? JSON.parse(idea.linkedEntities) : null,
       inspirationFor: idea.inspirationFor ? JSON.parse(idea.inspirationFor) : null,
@@ -41,10 +40,12 @@ router.get('/ideas', async (req, res) => {
     const result = await db
       .select()
       .from(ideas)
-      .where(isNull(ideas.projectId))
       .all()
     
-    const parsed = result.map(idea => ({
+    // Filter to global ideas only (null projectId)
+    const filtered = result.filter(idea => idea.projectId === null)
+    
+    const parsed = filtered.map(idea => ({
       ...idea,
       linkedEntities: idea.linkedEntities ? JSON.parse(idea.linkedEntities) : null,
       inspirationFor: idea.inspirationFor ? JSON.parse(idea.inspirationFor) : null,
