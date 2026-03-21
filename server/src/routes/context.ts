@@ -1,0 +1,45 @@
+// server/src/routes/context.ts
+import { Router } from 'express'
+import { contextAssemblyEngine } from '../services/contextAssemblyEngine'
+
+const router = Router()
+
+// GET /projects/:projectId/context - Get assembled context for chapter
+router.get('/projects/:projectId/context', async (req, res) => {
+  try {
+    const { projectId } = req.params
+    const {
+      chapterId,
+      chapterNumber,
+      charIds,
+      locIds,
+      threadIds,
+      recentChapters,
+    } = req.query
+
+    console.log('=== CONTEXT ROUTE DEBUG ===')
+    console.log('Project ID:', projectId)
+    console.log('Char IDs:', charIds)
+    console.log('contextAssemblyEngine type:', typeof contextAssemblyEngine)
+    console.log('assembleContext method:', typeof contextAssemblyEngine.assembleContext)
+
+    const context = await contextAssemblyEngine.assembleContext(projectId, {
+      chapterId: chapterId as string,
+      chapterNumber: chapterNumber ? parseInt(chapterNumber as string) : undefined,
+      relevantCharacterIds: charIds ? (charIds as string).split(',') : [],
+      relevantLocationIds: locIds ? (locIds as string).split(',') : [],
+      relevantThreadIds: threadIds ? (threadIds as string).split(',') : [],
+      includeRecentChapters: recentChapters ? parseInt(recentChapters as string) : 3,
+    })
+
+    console.log('Context result:', JSON.stringify(context, null, 2))
+    console.log('=== END DEBUG ===')
+
+    res.json(context)
+  } catch (error) {
+    console.error('Error assembling context:', error)
+    res.status(500).json({ error: 'Failed to assemble context' })
+  }
+})
+
+export const app = router

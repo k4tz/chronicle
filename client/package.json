@@ -1,0 +1,31 @@
+{
+  "name": "chronicle-client",
+  "version": "1.0.0",
+  "description": "Frontend for Chronicle - Long-form novel writing app",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.59.16",
+    "axios": "^1.7.7",
+    "force-graph": "^1.51.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-force-graph-2d": "^1.29.1",
+    "react-router-dom": "^7.13.1",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.10"
+  }
+}

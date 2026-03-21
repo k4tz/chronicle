@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+**/dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database files (SQLite)
+*.db
+*.sqlite
+*.sqlite3
+server/dev.db
+server/src/db/migrations/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.DS_Store
+Thumbs.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test-chapter-pipeline.js

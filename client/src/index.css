@@ -1,0 +1,141 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Default light mode */
+  body {
+    @apply bg-gray-50 text-gray-900;
+  }
+
+  /* Dark mode overrides */
+  .dark {
+    /* Background */
+    --bg-primary: #111827;
+    --bg-secondary: #1f2937;
+    --bg-tertiary: #374151;
+    
+    /* Text */
+    --text-primary: #f9fafb;
+    --text-secondary: #d1d5db;
+    --text-muted: #9ca3af;
+    
+    /* Borders */
+    --border-default: #374151;
+  }
+
+  .dark body {
+    @apply bg-gray-900 text-gray-100;
+  }
+
+  /* Auto-apply dark mode to common elements */
+  .dark h1, .dark h2, .dark h3, .dark h4, .dark h5, .dark h6 {
+    @apply text-gray-100;
+  }
+
+  .dark p, .dark span, .dark div {
+    @apply text-gray-100;
+  }
+
+  .dark label {
+    @apply text-gray-300;
+  }
+
+  .dark .text-gray-500, .dark .text-gray-600 {
+    @apply text-gray-400;
+  }
+
+  .dark .text-gray-700, .dark .text-gray-800 {
+    @apply text-gray-300;
+  }
+
+  /* Backgrounds */
+  .dark .bg-white {
+    @apply bg-gray-800;
+  }
+
+  .dark .bg-gray-50 {
+    @apply bg-gray-900;
+  }
+
+  .dark .bg-gray-100 {
+    @apply bg-gray-800;
+  }
+
+  .dark .bg-gray-200 {
+    @apply bg-gray-700;
+  }
+
+  /* Form elements */
+  .dark input:not([type='submit']):not([type='button']):not([type='checkbox']):not([type='radio']),
+  .dark textarea,
+  .dark select {
+    @apply bg-gray-700 text-gray-100 border-gray-600 placeholder-gray-500;
+  }
+
+  .dark option {
+    @apply bg-gray-700 text-gray-100;
+  }
+
+  /* Borders */
+  .dark .border,
+  .dark .border-gray-200,
+  .dark .border-gray-300 {
+    @apply border-gray-700;
+  }
+
+  /* Hover states */
+  .dark .hover\:bg-gray-50:hover {
+    @apply hover:bg-gray-800;
+  }
+
+  .dark .hover\:bg-gray-100:hover {
+    @apply hover:bg-gray-700;
+  }
+
+  .dark .hover\:bg-white:hover {
+    @apply hover:bg-gray-700;
+  }
+
+  .dark .hover\:text-gray-800:hover {
+    @apply hover:text-gray-200;
+  }
+}
+
+/* Utility classes for common patterns */
+@layer components {
+  .page-container {
+    @apply p-8 bg-gray-50 dark:bg-gray-900 min-h-screen;
+  }
+
+  .card {
+    @apply bg-white dark:bg-gray-800 rounded-lg shadow p-6;
+  }
+
+  .card-hover {
+    @apply bg-white dark:bg-gray-800 rounded-lg shadow hover:shadow-md transition;
+  }
+
+  .input-field {
+    @apply w-full px-3 py-2 border rounded bg-white dark:bg-gray-700 
+           text-gray-900 dark:text-gray-100 
+           border-gray-300 dark:border-gray-600
+           focus:outline-none focus:ring-2 focus:ring-blue-500;
+  }
+
+  .btn-primary {
+    @apply px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 disabled:opacity-50;
+  }
+
+  .section-title {
+    @apply text-xl font-semibold mb-4 text-gray-900 dark:text-gray-100;
+  }
+
+  .page-title {
+    @apply text-3xl font-bold mb-8 text-gray-900 dark:text-gray-100;
+  }
+}
