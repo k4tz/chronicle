@@ -2,6 +2,7 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { ProjectsProvider } from './store/projects'
 import Layout from './components/Layout'
+import HomePage from './pages/Home'
 import ProjectList from './pages/ProjectList'
 import ProjectDetail from './pages/ProjectDetail'
 import WorldFoundationPage from './pages/WorldFoundation'
@@ -26,7 +27,9 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Layout />}>
-            <Route index element={<ProjectList />} />
+            <Route index element={<HomePage />} />
+            <Route path="projects" element={<ProjectList />} />
+            <Route path="projects/new" element={<ProjectList />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
             <Route path="projects/:projectId/chapters" element={<ChaptersPage />} />
             <Route path="projects/:projectId/chapters/:chapterId" element={<ChapterEditorPage />} />

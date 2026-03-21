@@ -30,33 +30,60 @@ export default function Layout() {
     <div className="flex h-screen bg-gray-50 dark:bg-gray-900 transition-colors">
       {/* Sidebar */}
       <aside className="w-64 bg-gray-900 text-white flex flex-col">
-        <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-          <h1 className="text-xl font-bold">Chronicle</h1>
-          <DarkModeToggle />
+        <div className="p-4 border-b border-gray-800">
+          <button
+            onClick={() => navigate('/')}
+            className="text-xl font-bold hover:text-blue-400 transition"
+          >
+            Chronicle
+          </button>
+          <div className="mt-2">
+            <DarkModeToggle />
+          </div>
         </div>
 
         <nav className="flex-1 p-4 overflow-y-auto">
           <ul className="space-y-1">
             <li>
-              <a href="/" className="block px-3 py-2 rounded hover:bg-gray-800">
-                All Projects
-              </a>
+              <button
+                onClick={() => navigate('/')}
+                className="w-full text-left px-3 py-2 rounded hover:bg-gray-800 transition"
+              >
+                🏠 Home
+              </button>
             </li>
-            {projectId && navItems.map((item) => (
-              <li key={item.path}>
-                <button
-                  onClick={() => navigate(item.path)}
-                  className="w-full text-left px-3 py-2 rounded hover:bg-gray-800"
-                >
-                  {item.label}
-                </button>
-              </li>
-            ))}
+            <li>
+              <button
+                onClick={() => navigate('/projects')}
+                className="w-full text-left px-3 py-2 rounded hover:bg-gray-800 transition"
+              >
+                📁 Projects
+              </button>
+            </li>
+            {projectId && (
+              <>
+                <li className="pt-4 pb-2">
+                  <span className="text-xs text-gray-500 uppercase tracking-wider">
+                    Project Tools
+                  </span>
+                </li>
+                {navItems.map((item) => (
+                  <li key={item.path}>
+                    <button
+                      onClick={() => navigate(item.path)}
+                      className="w-full text-left px-3 py-2 rounded hover:bg-gray-800 transition"
+                    >
+                      {item.label}
+                    </button>
+                  </li>
+                ))}
+              </>
+            )}
           </ul>
         </nav>
 
         <div className="p-4 border-t border-gray-800 text-sm text-gray-400">
-          v1.0.0 - All Phases
+          v1.0.0
         </div>
       </aside>
 
