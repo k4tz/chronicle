@@ -160,21 +160,24 @@ router.put('/projects/:id', async (req, res) => {
   }
 })
 
-// PUT /projects/:id/settings - Update project settings (snapshot/recency)
+// PUT /projects/:id/settings - Update project settings (snapshot/recency + chapter generation)
 router.put('/projects/:id/settings', async (req, res) => {
   try {
-    const { recentChaptersCount, minRecentChapters, maxRecentChapters } = req.body
+    const { recentChaptersCount, minRecentChapters, maxRecentChapters, minWordCountPerChapter } = req.body
     const now = new Date().toISOString()
 
     // Validate and clamp values to sane limits
-    let validatedRecentCount = recentChaptersCount !== undefined 
-      ? Math.max(1, Math.min(recentChaptersCount, 20)) 
+    let validatedRecentCount = recentChaptersCount !== undefined
+      ? Math.max(1, Math.min(recentChaptersCount, 20))
       : undefined
-    let validatedMin = minRecentChapters !== undefined 
-      ? Math.max(1, Math.min(minRecentChapters, 10)) 
+    let validatedMin = minRecentChapters !== undefined
+      ? Math.max(1, Math.min(minRecentChapters, 10))
       : undefined
-    let validatedMax = maxRecentChapters !== undefined 
-      ? Math.max(1, Math.min(maxRecentChapters, 20)) 
+    let validatedMax = maxRecentChapters !== undefined
+      ? Math.max(1, Math.min(maxRecentChapters, 20))
+      : undefined
+    let validatedWordCount = minWordCountPerChapter !== undefined
+      ? Math.max(500, Math.min(minWordCountPerChapter, 10000))
       : undefined
 
     // Ensure min <= max
@@ -192,6 +195,7 @@ router.put('/projects/:id/settings', async (req, res) => {
     const finalMin = validatedMin ?? project.minRecentChapters ?? 1
     const finalMax = validatedMax ?? project.maxRecentChapters ?? 5
     const finalRecentCount = validatedRecentCount ?? project.recentChaptersCount ?? 3
+    const finalWordCount = validatedWordCount ?? project.minWordCountPerChapter ?? 2000
 
     // Ensure recentChaptersCount is within bounds
     const clampedRecentCount = Math.max(finalMin, Math.min(finalRecentCount, finalMax))
@@ -201,17 +205,19 @@ router.put('/projects/:id/settings', async (req, res) => {
         recentChaptersCount: clampedRecentCount,
         minRecentChapters: finalMin,
         maxRecentChapters: finalMax,
+        minWordCountPerChapter: finalWordCount,
         updatedAt: now,
       })
       .where(eq(projects.id, req.params.id))
 
     const updated = await db.select().from(projects).where(eq(projects.id, req.params.id)).get()
-    res.json({ 
-      message: 'Settings updated', 
+    res.json({
+      message: 'Settings updated',
       settings: {
         recentChaptersCount: updated?.recentChaptersCount,
         minRecentChapters: updated?.minRecentChapters,
         maxRecentChapters: updated?.maxRecentChapters,
+        minWordCountPerChapter: updated?.minWordCountPerChapter,
       }
     })
   } catch (error) {

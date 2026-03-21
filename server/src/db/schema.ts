@@ -8,21 +8,23 @@ import { relations } from 'drizzle-orm'
 // - JSON fields: store as text, parse/stringify in the service layer
 
 export const projects = sqliteTable('projects', {
-  id:                 text('id').primaryKey(),
-  title:              text('title').notNull(),
-  logline:            text('logline'),
-  genre:              text('genre'),
-  tone:               text('tone'),
-  contentRating:      text('content_rating').notNull().default('general'),
-  pov:                text('pov').notNull().default('third-limited'),
-  targetWordCount:    integer('target_word_count').notNull().default(100000),
-  currentWordCount:   integer('current_word_count').notNull().default(0),
+  id:                    text('id').primaryKey(),
+  title:                 text('title').notNull(),
+  logline:               text('logline'),
+  genre:                 text('genre'),
+  tone:                  text('tone'),
+  contentRating:         text('content_rating').notNull().default('general'),
+  pov:                   text('pov').notNull().default('third-limited'),
+  targetWordCount:       integer('target_word_count').notNull().default(100000),
+  currentWordCount:      integer('current_word_count').notNull().default(0),
   // Snapshot/recency settings for context assembly
-  recentChaptersCount: integer('recent_chapters_count').notNull().default(3),  // How many recent chapters to include
-  minRecentChapters:   integer('min_recent_chapters').notNull().default(1),    // Minimum recent chapters
-  maxRecentChapters:   integer('max_recent_chapters').notNull().default(5),    // Maximum recent chapters
-  createdAt:          text('created_at').notNull(),
-  updatedAt:          text('updated_at').notNull(),
+  recentChaptersCount:   integer('recent_chapters_count').notNull().default(3),  // How many recent chapters to include
+  minRecentChapters:     integer('min_recent_chapters').notNull().default(1),    // Minimum recent chapters
+  maxRecentChapters:     integer('max_recent_chapters').notNull().default(5),    // Maximum recent chapters
+  // Chapter generation settings
+  minWordCountPerChapter: integer('min_word_count_per_chapter').notNull().default(2000),  // Default word count for chapter generation
+  createdAt:             text('created_at').notNull(),
+  updatedAt:             text('updated_at').notNull(),
 })
 
 export const worldFoundations = sqliteTable('world_foundations', {

@@ -35,6 +35,13 @@ router.post('/projects/:projectId/chapters/:chapterId/generate/outline', async (
     // Get chapter and context
     const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
     if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
+    
+    // Get project settings for default word count
+    const project = await db.select().from(projects).where(eq(projects.id, projectId)).get()
+    if (!project) return res.status(404).json({ error: 'Project not found' })
+    
+    // Use provided wordCount, or project default, or fallback to 2000
+    const targetWordCount = wordCount ?? project.minWordCountPerChapter ?? 2000
 
     const context = await contextAssemblyEngine.assembleContext(projectId, {
       chapterId,
@@ -58,7 +65,7 @@ router.post('/projects/:projectId/chapters/:chapterId/generate/outline', async (
     const prompt = substituteTemplate(template, {
       chapterNumber: chapter.number.toString(),
       chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      wordCount: wordCount?.toString() || '2000',
+      wordCount: targetWordCount.toString(),
       tension: tension?.toString() || '5',
       focus: focus || 'Balanced',
       styleProfile,

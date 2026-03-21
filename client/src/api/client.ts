@@ -43,6 +43,8 @@ export interface Project {
   recentChaptersCount: number
   minRecentChapters: number
   maxRecentChapters: number
+  // Chapter generation settings
+  minWordCountPerChapter: number
   createdAt: string
   updatedAt: string
 }
@@ -67,6 +69,7 @@ export interface ProjectSettingsInput {
   recentChaptersCount?: number
   minRecentChapters?: number
   maxRecentChapters?: number
+  minWordCountPerChapter?: number
 }
 
 export const projectsApi = {

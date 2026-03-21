@@ -14,6 +14,7 @@ export default function ProjectDetail() {
     recentChaptersCount: 3,
     minRecentChapters: 1,
     maxRecentChapters: 5,
+    minWordCountPerChapter: 2000,
   })
 
   const { data: project, isLoading, error } = useProject(id ?? null)
@@ -82,6 +83,7 @@ export default function ProjectDetail() {
     recentChaptersCount: proj.recentChaptersCount ?? 3,
     minRecentChapters: proj.minRecentChapters ?? 1,
     maxRecentChapters: proj.maxRecentChapters ?? 5,
+    minWordCountPerChapter: proj.minWordCountPerChapter ?? 2000,
   }
 
   return (
@@ -253,10 +255,31 @@ export default function ProjectDetail() {
           </div>
         </div>
 
+        {/* Min Word Count Per Chapter */}
+        <div className="mt-6">
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+            Default Chapter Word Count
+            <span className="block text-xs text-gray-500 dark:text-gray-400">Used when generating chapters (500-10000)</span>
+          </label>
+          {editingSettings ? (
+            <input
+              type="number"
+              min="500"
+              max="10000"
+              step="100"
+              value={settings.minWordCountPerChapter}
+              onChange={(e) => setSettings({ ...settings, minWordCountPerChapter: parseInt(e.target.value) || 2000 })}
+              className="w-full md:w-1/3 px-3 py-2 border rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 border-gray-300 dark:border-gray-600"
+            />
+          ) : (
+            <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">{currentSettings.minWordCountPerChapter} words</p>
+          )}
+        </div>
+
         {editingSettings && (
           <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
             <p className="text-sm text-blue-800 dark:text-blue-300">
-              <strong>Validation Rules:</strong> Min must be 1-10, Max must be 1-20, Min ≤ Max, and Recent Chapters must be between Min and Max.
+              <strong>Validation Rules:</strong> Min must be 1-10, Max must be 1-20, Min ≤ Max, Recent Chapters must be between Min and Max, and Word Count must be 500-10000.
             </p>
           </div>
         )}
