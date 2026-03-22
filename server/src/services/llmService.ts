@@ -39,13 +39,22 @@ export class OllamaService implements LLMService {
   constructor() {
     this.baseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
     this.model = process.env.GENERATION_MODEL || 'llama-model'
-    
+
     // Calculate max tokens for generation based on environment
-    // This ensures we don't exceed the model's context window
+    // For creative writing, we want maximum output tokens
+    // MODEL_CONTEXT_WINDOW: Total context (input + output)
+    // GENERATION_HEADROOM: Reserved for output (we use 90% of this)
     const modelContextWindow = parseInt(process.env.MODEL_CONTEXT_WINDOW || '8192')
     const generationHeadroom = parseInt(process.env.GENERATION_HEADROOM || '4096')
-    // Use headroom as the max prediction limit with 10% safety margin
-    this.maxPredictTokens = Math.floor(generationHeadroom * 0.9)
+    
+    // Use 90% of headroom for predictions, but cap at model's reasonable max
+    // For creative writing, higher is better - let the model write
+    this.maxPredictTokens = Math.min(
+      Math.floor(generationHeadroom * 0.9),
+      modelContextWindow / 2  // Don't exceed half the context window
+    )
+    
+    console.log(`[LLMService] Token settings: context=${modelContextWindow}, headroom=${generationHeadroom}, maxPredict=${this.maxPredictTokens}`)
   }
 
   async *generate(req: GenerationRequest): AsyncGenerator<string> {

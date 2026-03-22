@@ -6,6 +6,14 @@ import { ideasApi, charactersApi, locationsApi, loreApi, Idea, Character, Locati
 type ViewMode = 'board' | 'list'
 type ScopeMode = 'project' | 'global'
 
+interface EvolutionSuggestion {
+  type: string
+  id: string
+  name: string
+  description: string
+  relevanceScore: number
+}
+
 export default function IdeasPage() {
   const { projectId } = useParams<{ projectId: string }>()
   const [loading, setLoading] = useState(true)
@@ -25,6 +33,16 @@ export default function IdeasPage() {
     isGlobal: false,
     deviationFactor: 0,
   })
+
+  // Generation modal state
+  const [showGenerateModal, setShowGenerateModal] = useState(false)
+  const [selectedIdea, setSelectedIdea] = useState<Idea | null>(null)
+  const [generationType, setGenerationType] = useState<'new' | 'evolve'>('new')
+  const [selectedTargetType, setSelectedTargetType] = useState<string>('')
+  const [selectedTargetId, setSelectedTargetId] = useState<string>('')
+  const [selectedEntityType, setSelectedEntityType] = useState<string>('')
+  const [generating, setGenerating] = useState(false)
+  const [evolutionSuggestions, setEvolutionSuggestions] = useState<EvolutionSuggestion[]>([])
 
   useEffect(() => { loadAllData() }, [projectId, scopeMode])
 
@@ -152,6 +170,52 @@ export default function IdeasPage() {
       ...insp,
       label: `${insp.type.charAt(0).toUpperCase() + insp.type.slice(1)}: ${insp.id.slice(0, 8)}...`,
     }))
+  }
+
+  // Generation handlers
+  const handleOpenGenerateModal = async (idea: Idea, type: 'new' | 'evolve' = 'new') => {
+    setSelectedIdea(idea)
+    setGenerationType(type)
+    setEvolutionSuggestions([])
+    
+    if (type === 'evolve' && projectId) {
+      try {
+        const suggestions = await ideasApi.getSuggestEvolutions(projectId, idea.id)
+        setEvolutionSuggestions(suggestions.suggestions || [])
+      } catch (error) {
+        console.error('Failed to fetch evolution suggestions:', error)
+      }
+    }
+    
+    setShowGenerateModal(true)
+  }
+
+  const handleGenerateFromIdea = async () => {
+    if (!projectId || !selectedIdea) return
+    
+    setGenerating(true)
+    try {
+      await ideasApi.generateFromIdea(
+        projectId,
+        selectedIdea.id,
+        generationType === 'evolve' ? 'evolve' : selectedTargetType,
+        generationType === 'evolve' ? selectedTargetId : undefined,
+        generationType === 'evolve' ? selectedEntityType : undefined
+      )
+      setShowGenerateModal(false)
+      setSelectedIdea(null)
+      setGenerationType('new')
+      setSelectedTargetType('')
+      setSelectedTargetId('')
+      setSelectedEntityType('')
+      loadAllData()
+      alert('Successfully generated from idea!')
+    } catch (error: any) {
+      console.error('Failed to generate from idea:', error)
+      alert(`Failed to generate: ${error.response?.data?.details || error.message}`)
+    } finally {
+      setGenerating(false)
+    }
   }
 
   const categories = ['plot', 'character', 'world', 'theme', 'scene', 'dialogue', 'location', 'cosmology', 'history', 'other']
@@ -423,6 +487,7 @@ export default function IdeasPage() {
                     getLinkedNames={getLinkedNames}
                     getInspirationHistory={getInspirationHistory}
                     categoryColor={getCategoryColor}
+                    onGenerate={handleOpenGenerateModal}
                   />
                 ))}
                 {ideasByCategory[category].length === 0 && (
@@ -445,6 +510,7 @@ export default function IdeasPage() {
               getLinkedNames={getLinkedNames}
               getInspirationHistory={getInspirationHistory}
               categoryColor={getCategoryColor}
+              onGenerate={handleOpenGenerateModal}
             />
           ))}
           {ideas.length === 0 && (
@@ -452,6 +518,172 @@ export default function IdeasPage() {
               <p className="text-gray-500 dark:text-gray-400">No ideas yet. Capture your inspiration above!</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Generation Modal */}
+      {showGenerateModal && selectedIdea && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-xl font-bold">Generate from Idea</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">{selectedIdea.title}</p>
+            </div>
+
+            <div className="p-6">
+              {/* Generation Type Selection */}
+              <div className="flex gap-4 mb-6">
+                <button
+                  onClick={() => setGenerationType('new')}
+                  className={`flex-1 px-4 py-3 rounded-lg border-2 transition ${
+                    generationType === 'new'
+                      ? 'border-purple-600 bg-purple-50 dark:bg-purple-900/20'
+                      : 'border-gray-300 dark:border-gray-600'
+                  }`}
+                >
+                  <span className="text-2xl">✨</span>
+                  <p className="font-semibold mt-1">Create New</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Generate a new KB entry</p>
+                </button>
+                <button
+                  onClick={() => setGenerationType('evolve')}
+                  className={`flex-1 px-4 py-3 rounded-lg border-2 transition ${
+                    generationType === 'evolve'
+                      ? 'border-amber-600 bg-amber-50 dark:bg-amber-900/20'
+                      : 'border-gray-300 dark:border-gray-600'
+                  }`}
+                >
+                  <span className="text-2xl">🔄</span>
+                  <p className="font-semibold mt-1">Evolve Existing</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Update an existing entry</p>
+                </button>
+              </div>
+
+              {generationType === 'new' ? (
+                /* New Entry Type Selection */
+                <div>
+                  <h3 className="font-semibold mb-3">Select Entry Type</h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    {[
+                      { value: 'character', label: 'Character', icon: '👤' },
+                      { value: 'location', label: 'Location', icon: '📍' },
+                      { value: 'lore', label: 'Lore Entry', icon: '📖' },
+                      { value: 'arc', label: 'Story Arc', icon: '📐' },
+                      { value: 'thread', label: 'Plot Thread', icon: '🧵' },
+                      { value: 'foreshadowing', label: 'Foreshadowing', icon: '🔮' },
+                    ].map(type => (
+                      <button
+                        key={type.value}
+                        onClick={() => setSelectedTargetType(type.value)}
+                        className={`p-3 rounded-lg border-2 text-left transition ${
+                          selectedTargetType === type.value
+                            ? 'border-blue-600 bg-blue-50 dark:bg-blue-900/20'
+                            : 'border-gray-300 dark:border-gray-600 hover:border-blue-400'
+                        }`}
+                      >
+                        <span className="text-xl">{type.icon}</span>
+                        <span className="ml-2 font-medium">{type.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                /* Evolution Target Selection */
+                <div>
+                  <h3 className="font-semibold mb-3">Select Entry to Evolve</h3>
+                  
+                  {evolutionSuggestions.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
+                        Suggested entries based on relevance to your idea:
+                      </p>
+                      {evolutionSuggestions.map(suggestion => (
+                        <button
+                          key={`${suggestion.type}-${suggestion.id}`}
+                          onClick={() => {
+                            setSelectedEntityType(suggestion.type)
+                            setSelectedTargetId(suggestion.id)
+                          }}
+                          className={`w-full p-3 rounded-lg border-2 text-left transition ${
+                            selectedTargetId === suggestion.id
+                              ? 'border-amber-600 bg-amber-50 dark:bg-amber-900/20'
+                              : 'border-gray-300 dark:border-gray-600 hover:border-amber-400'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <p className="font-medium">{suggestion.name}</p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400 capitalize">{suggestion.type}</p>
+                              {suggestion.description && (
+                                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 truncate">
+                                  {suggestion.description}
+                                </p>
+                              )}
+                            </div>
+                            <span className="text-xs bg-amber-100 dark:bg-amber-900/50 text-amber-800 dark:text-amber-300 px-2 py-1 rounded">
+                              {Math.round(suggestion.relevanceScore * 100)}% match
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
+                        No suggestions found. Manually select an entry type and enter the ID:
+                      </p>
+                      <div className="flex gap-2">
+                        <select
+                          value={selectedEntityType}
+                          onChange={(e) => setSelectedEntityType(e.target.value)}
+                          className="flex-1 px-3 py-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        >
+                          <option value="">Select type...</option>
+                          <option value="character">Character</option>
+                          <option value="location">Location</option>
+                          <option value="lore">Lore</option>
+                          <option value="arc">Arc</option>
+                          <option value="thread">Thread</option>
+                        </select>
+                        <input
+                          type="text"
+                          value={selectedTargetId}
+                          onChange={(e) => setSelectedTargetId(e.target.value)}
+                          placeholder="Entry ID"
+                          className="flex-1 px-3 py-2 border rounded dark:bg-gray-700 dark:border-gray-600"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="p-6 border-t border-gray-200 dark:border-gray-700 flex gap-3">
+              <button
+                onClick={() => {
+                  setShowGenerateModal(false)
+                  setSelectedIdea(null)
+                  setGenerationType('new')
+                  setSelectedTargetType('')
+                  setSelectedTargetId('')
+                  setSelectedEntityType('')
+                  setEvolutionSuggestions([])
+                }}
+                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700"
+                disabled={generating}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleGenerateFromIdea}
+                disabled={!generationType || (generationType === 'new' && !selectedTargetType) || (generationType === 'evolve' && (!selectedEntityType || !selectedTargetId)) || generating}
+                className="flex-1 px-4 py-2 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {generating ? 'Generating...' : generationType === 'new' ? 'Generate New Entry' : 'Evolve Entry'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -467,9 +699,10 @@ interface IdeaCardProps {
   getLinkedNames: (idea: Idea) => string[]
   getInspirationHistory: (idea: Idea) => Array<{ type: string; id: string; createdAt: string; label: string }>
   categoryColor: (cat: string) => string
+  onGenerate?: (idea: Idea, type: 'new' | 'evolve') => void
 }
 
-function IdeaCard({ idea, onEdit, onDelete, onToggleUsed, onDeviationChange, getLinkedNames, getInspirationHistory, categoryColor }: IdeaCardProps) {
+function IdeaCard({ idea, onEdit, onDelete, onToggleUsed, onDeviationChange, getLinkedNames, getInspirationHistory, categoryColor, onGenerate }: IdeaCardProps) {
   const linkedNames = getLinkedNames(idea)
   const inspirationHistory = getInspirationHistory(idea)
 
@@ -486,7 +719,27 @@ function IdeaCard({ idea, onEdit, onDelete, onToggleUsed, onDeviationChange, get
       </div>
       <h3 className="text-lg font-semibold mb-2">{idea.title}</h3>
       {idea.description && <p className="text-gray-600 dark:text-gray-300 text-sm mb-3">{idea.description}</p>}
-      
+
+      {/* Generate Buttons */}
+      {onGenerate && (
+        <div className="flex gap-2 mb-3">
+          <button
+            onClick={() => onGenerate(idea, 'new')}
+            className="flex-1 px-3 py-1.5 text-xs font-medium bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded hover:from-purple-700 hover:to-blue-700 transition"
+            title="Generate new KB entry from this idea"
+          >
+            ✨ Generate New
+          </button>
+          <button
+            onClick={() => onGenerate(idea, 'evolve')}
+            className="flex-1 px-3 py-1.5 text-xs font-medium bg-gradient-to-r from-amber-600 to-orange-600 text-white rounded hover:from-amber-700 hover:to-orange-700 transition"
+            title="Evolve existing KB entry with this idea"
+          >
+            🔄 Evolve
+          </button>
+        </div>
+      )}
+
       {/* Used Status */}
       <div className="flex items-center gap-2 mb-3">
         <button

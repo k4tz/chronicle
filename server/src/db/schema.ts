@@ -23,6 +23,7 @@ export const projects = sqliteTable('projects', {
   maxRecentChapters:     integer('max_recent_chapters').notNull().default(5),    // Maximum recent chapters
   // Chapter generation settings
   minWordCountPerChapter: integer('min_word_count_per_chapter').notNull().default(2000),  // Default word count for chapter generation
+  maxWordCountPerChapter: integer('max_word_count_per_chapter').notNull().default(4000),  // Maximum word count for chapter generation
   createdAt:             text('created_at').notNull(),
   updatedAt:             text('updated_at').notNull(),
 })

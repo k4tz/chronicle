@@ -139,9 +139,9 @@ export function renderTextWithLinks(
       <span
         key={i}
         className={`inline-block px-1 rounded cursor-pointer hover:underline ${
-          link.type === 'character' ? 'bg-green-100 text-green-800' :
-          link.type === 'location' ? 'bg-blue-100 text-blue-800' :
-          'bg-purple-100 text-purple-800'
+          link.type === 'character' ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300' :
+          link.type === 'location' ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300' :
+          'bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300'
         }`}
         onClick={() => onEntityClick?.(link)}
         title={`${link.type}: ${link.name}`}

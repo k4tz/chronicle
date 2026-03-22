@@ -67,30 +67,30 @@ export default function ForeshadowingPage() {
 
       <div className="grid gap-4 md:grid-cols-2">
         {entries.map((entry) => (
-          <div key={entry.id} className={`bg-white p-6 rounded-lg shadow border-l-4 ${entry.status === 'resolved' ? 'border-green-500' : 'border-yellow-500'}`}>
+          <div key={entry.id} className={`bg-white dark:bg-gray-800 p-6 rounded-lg shadow border-l-4 ${entry.status === 'resolved' ? 'border-green-500' : 'border-yellow-500'}`}>
             <div className="flex items-start justify-between mb-4">
-              <span className={`px-2 py-1 rounded text-xs ${entry.status === 'resolved' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+              <span className={`px-2 py-1 rounded text-xs ${entry.status === 'resolved' ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300' : 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300'}`}>
                 {entry.status}
               </span>
               <button onClick={() => handleUpdateStatus(entry, entry.status === 'open' ? 'resolved' : 'open')}
-                className="text-sm text-blue-600 hover:underline">
+                className="text-sm text-blue-600 dark:text-blue-400 hover:underline">
                 {entry.status === 'open' ? 'Mark Resolved' : 'Reopen'}
               </button>
             </div>
             <div>
-              <h4 className="font-medium text-gray-700 mb-2">Setup:</h4>
-              <p className="text-gray-600 text-sm">{entry.setup}</p>
+              <h4 className="font-medium text-gray-700 dark:text-gray-200 mb-2">Setup:</h4>
+              <p className="text-gray-600 dark:text-gray-300 text-sm">{entry.setup}</p>
             </div>
             {entry.plannedPayoff && (
               <div className="mt-4">
-                <h4 className="font-medium text-gray-700 mb-2">Planned Payoff:</h4>
-                <p className="text-gray-600 text-sm">{entry.plannedPayoff}</p>
+                <h4 className="font-medium text-gray-700 dark:text-gray-200 mb-2">Planned Payoff:</h4>
+                <p className="text-gray-600 dark:text-gray-300 text-sm">{entry.plannedPayoff}</p>
               </div>
             )}
           </div>
         ))}
-        {entries.length === 0 && <div className="col-span-full text-center py-12 bg-gray-100 rounded-lg">
-          <p className="text-gray-500">No foreshadowing entries yet.</p>
+        {entries.length === 0 && <div className="col-span-full text-center py-12 bg-gray-100 dark:bg-gray-800 rounded-lg">
+          <p className="text-gray-500 dark:text-gray-400">No foreshadowing entries yet.</p>
         </div>}
       </div>
     </div>

@@ -320,6 +320,20 @@ export const ideasApi = {
   async delete(projectId: string, id: string): Promise<void> {
     await apiClient.delete(`/projects/${projectId}/ideas/${id}`)
   },
+
+  async generateFromIdea(projectId: string, ideaId: string, targetType: string, targetId?: string, entityType?: string): Promise<any> {
+    const response = await apiClient.post(`/projects/${projectId}/ideas/${ideaId}/generate`, {
+      targetType,
+      targetId,
+      entityType,
+    })
+    return response.data
+  },
+
+  async getSuggestEvolutions(projectId: string, ideaId: string): Promise<any> {
+    const response = await apiClient.get(`/projects/${projectId}/ideas/${ideaId}/suggest-evolutions`)
+    return response.data
+  },
 }
 
 // Knowledge Base
