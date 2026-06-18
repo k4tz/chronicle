@@ -1,8 +1,8 @@
 // server/src/services/kbService.ts
 import { db, eq } from '../db'
 import { and } from 'drizzle-orm'
-import { kbEntries, projects } from '../db/schema'
-import { KBService, KBEntry, AssembledContext, ChapterContext } from '../types/services'
+import { kbEntries } from '../db/schema'
+import { KBService, KBEntry } from '../types/services'
 import { llmService } from './llmService'
 import { nanoid } from 'nanoid'
 
@@ -330,71 +330,6 @@ Only include updates with high confidence (70+). Be specific and concise.`
           createdAt: v.createdAt,
         }
       })
-  }
-
-  async getActiveContext(
-    projectId: string,
-    chapterContext: ChapterContext
-  ): Promise<AssembledContext> {
-    // Tier 1: Core context (project premise, active characters)
-    const project = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .get()
-
-    const tier1Parts: string[] = []
-    if (project) {
-      tier1Parts.push(`Title: ${project.title}`)
-      if (project.logline) tier1Parts.push(`Logline: ${project.logline}`)
-      if (project.genre) tier1Parts.push(`Genre: ${project.genre}`)
-      if (project.tone) tier1Parts.push(`Tone: ${project.tone}`)
-      if (project.pov) tier1Parts.push(`POV: ${project.pov}`)
-    }
-
-    // Get character states for active characters
-    const activeCharIds = chapterContext.relevantCharacterIds
-    if (activeCharIds.length > 0) {
-      // This would need characterStates table - simplified for now
-      tier1Parts.push(`Active Characters: ${activeCharIds.join(', ')}`)
-    }
-
-    // Tier 2: Chapter-relevant KB entries
-    const tier2Parts: string[] = []
-    const relevantEntityTypes = ['character', 'location']
-    for (const entityType of relevantEntityTypes) {
-      const entries = await this.getByEntity(projectId, entityType)
-      for (const entry of entries) {
-        tier2Parts.push(`[${entry.entityType}:${entry.entityId || 'N/A'}] ${entry.content}`)
-      }
-    }
-
-    // Tier 3: Recent chapter summaries (from kbEntries with PROGRESSIVE layer)
-    const tier3Parts: string[] = []
-    const recentEntries = await db
-      .select()
-      .from(kbEntries)
-      .where(eq(kbEntries.projectId, projectId))
-      .all()
-
-    for (const entry of recentEntries.slice(-3)) {
-      tier3Parts.push(entry.compressedContent || entry.content)
-    }
-
-    const tier1 = tier1Parts.join('\n')
-    const tier2 = tier2Parts.join('\n\n')
-    const tier3 = tier3Parts.join('\n\n')
-
-    // Estimate tokens (1 token ≈ 4 chars)
-    const totalChars = tier1.length + tier2.length + tier3.length
-    const totalTokenEstimate = Math.ceil(totalChars / 4)
-
-    return {
-      tier1,
-      tier2,
-      tier3,
-      totalTokenEstimate,
-    }
   }
 
   private toKBEntry(row: any): KBEntry {

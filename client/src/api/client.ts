@@ -2,8 +2,7 @@
 import axios from 'axios'
 
 // Configurable for deployment; defaults to the local dev server.
-const ENV_API = (import.meta as any).env?.VITE_API_URL as string | undefined
-export const API_BASE_URL = ENV_API || 'http://localhost:3001/api'
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
