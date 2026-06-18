@@ -1,8 +1,9 @@
 // server/src/services/kbService.ts
 import { db, eq } from '../db'
+import { and } from 'drizzle-orm'
 import { kbEntries, projects } from '../db/schema'
 import { KBService, KBEntry, AssembledContext, ChapterContext } from '../types/services'
-import { OllamaService } from './llmService'
+import { llmService } from './llmService'
 import { nanoid } from 'nanoid'
 
 export interface KBUpdate {
@@ -26,12 +27,6 @@ export interface KBVersion {
 }
 
 export class KBServiceSQLite implements KBService {
-  private llmService: OllamaService
-
-  constructor() {
-    this.llmService = new OllamaService()
-  }
-
   async search(
     projectId: string,
     query: string,
@@ -90,12 +85,12 @@ export class KBServiceSQLite implements KBService {
     const id = crypto.randomUUID()
     const now = new Date().toISOString()
 
-    // Check if exists
+    // Check if exists (scoped to this project — entityId is not globally unique)
     const existing = entry.entityId
       ? await db
           .select()
           .from(kbEntries)
-          .where(eq(kbEntries.entityId, entry.entityId!))
+          .where(and(eq(kbEntries.projectId, entry.projectId), eq(kbEntries.entityId, entry.entityId!)))
           .get()
       : null
 
@@ -190,7 +185,7 @@ Return a JSON array of updates:
 Only include updates with high confidence (70+). Be specific and concise.`
 
     try {
-      const response = await this.llmService.complete({
+      const response = await llmService.complete({
         systemPrompt: 'You are a lore keeper tracking story evolution. Return ONLY valid JSON array.',
         userPrompt: prompt,
         maxTokens: 3000,
@@ -223,16 +218,14 @@ Only include updates with high confidence (70+). Be specific and concise.`
 
     for (const update of updates) {
       try {
-        // Find existing entry
+        // Find existing entry (scoped to this project)
         const existing = await db
           .select()
           .from(kbEntries)
-          .where(
-            eq(kbEntries.entityType, update.entityType)
-          )
+          .where(and(eq(kbEntries.projectId, projectId), eq(kbEntries.entityType, update.entityType)))
           .all()
-          .then(entries => entries.find(e => 
-            e.entityId === update.entityId || 
+          .then(entries => entries.find(e =>
+            e.entityId === update.entityId ||
             (e.entityId === null && update.entityId === null)
           ))
 
@@ -314,23 +307,29 @@ Only include updates with high confidence (70+). Be specific and concise.`
    * Get version history for a KB entry
    */
   async getVersionHistory(entryId: string): Promise<KBVersion[]> {
-    const versions = await db
+    // Version records are PROGRESSIVE kb_entries whose entityId points back to
+    // the original entry and whose entityType ends in '_version'.
+    const rows = await db
       .select()
       .from(kbEntries)
-      .where(
-        eq(kbEntries.entityType, 'world_version')
-      )
+      .where(eq(kbEntries.entityId, entryId))
       .all()
 
-    return versions.map(v => ({
-      id: v.id,
-      entryId: v.entityId || '',
-      content: v.content,
-      changeSummary: v.content,
-      chapterId: '',
-      chapterNumber: 0,
-      createdAt: v.createdAt,
-    }))
+    return rows
+      .filter(v => v.entityType.endsWith('_version'))
+      .map(v => {
+        let parsed: any = {}
+        try { parsed = JSON.parse(v.content) } catch { /* legacy/plain content */ }
+        return {
+          id: v.id,
+          entryId: v.entityId || '',
+          content: parsed.newContent ?? v.content,
+          changeSummary: parsed.reason ?? '',
+          chapterId: '',
+          chapterNumber: parsed.chapterNumber ?? 0,
+          createdAt: v.createdAt,
+        }
+      })
   }
 
   async getActiveContext(

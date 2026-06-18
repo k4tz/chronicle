@@ -2,7 +2,7 @@
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
 import { db, eq } from '../db'
-import { projects, characters, locations, worldFoundations, storyArcs } from '../db/schema'
+import { projects, worldFoundations, storyArcs } from '../db/schema'
 
 const router = Router()
 
@@ -21,6 +21,9 @@ router.get('/projects', async (req, res) => {
 router.post('/projects', async (req, res) => {
   try {
     const data = req.body
+    if (!data?.title || typeof data.title !== 'string' || !data.title.trim()) {
+      return res.status(400).json({ error: 'Project title is required' })
+    }
     const now = new Date().toISOString()
     const id = nanoid()
 
@@ -227,16 +230,14 @@ router.put('/projects/:id/settings', async (req, res) => {
 })
 
 // DELETE /projects/:id - Delete a project
+// All child rows (chapters, versions, snapshots, characters, locations,
+// relationships, lore, arcs, threads, foreshadowing, ideas, style profiles, KB
+// entries, generation logs, etc.) are removed automatically via the
+// ON DELETE CASCADE constraints in schema.ts — foreign keys are enforced in
+// db/index.ts. No manual child deletes are needed.
 router.delete('/projects/:id', async (req, res) => {
   try {
     await db.delete(projects).where(eq(projects.id, req.params.id))
-
-    // Also delete related entities in cascade
-    await db.delete(characters).where(eq(characters.projectId, req.params.id))
-    await db.delete(locations).where(eq(locations.projectId, req.params.id))
-    await db.delete(worldFoundations).where(eq(worldFoundations.projectId, req.params.id))
-    await db.delete(storyArcs).where(eq(storyArcs.projectId, req.params.id))
-
     res.json({ message: 'Project deleted', id: req.params.id })
   } catch (error) {
     console.error('Error deleting project:', error)

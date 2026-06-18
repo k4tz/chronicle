@@ -1,13 +1,29 @@
 // client/src/components/Layout.tsx
-import { Outlet, useNavigate, useParams } from 'react-router-dom'
+import { useEffect } from 'react'
+import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useProjectsStore } from '../store/projects'
 import DarkModeToggle from './DarkModeToggle'
+import ErrorBoundary from './ErrorBoundary'
 
 export default function Layout() {
-  const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const selectedProjectId = useProjectsStore((state) => state.selectedProjectId)
-  const projectId = id || selectedProjectId
+  const setSelectedProjectId = useProjectsStore((state) => state.setSelectedProjectId)
+
+  // Derive the active project from the URL — this works on every nested route
+  // (the Layout route itself has no params) — and remember it so the sidebar
+  // stays populated on pages without a project id and across reloads.
+  const match = location.pathname.match(/\/projects\/([^/]+)/)
+  const urlProjectId = match && match[1] !== 'new' ? match[1] : null
+
+  useEffect(() => {
+    if (urlProjectId && urlProjectId !== selectedProjectId) {
+      setSelectedProjectId(urlProjectId)
+    }
+  }, [urlProjectId, selectedProjectId, setSelectedProjectId])
+
+  const projectId = urlProjectId || selectedProjectId
 
   const navItems = projectId ? [
     { label: 'Project', path: `/projects/${projectId}` },
@@ -89,7 +105,9 @@ export default function Layout() {
 
       {/* Main content */}
       <main className="flex-1 overflow-auto bg-white dark:bg-gray-900 dark:text-gray-100">
-        <Outlet />
+        <ErrorBoundary key={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
     </div>
   )

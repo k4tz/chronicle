@@ -1,5 +1,5 @@
 // client/src/api/api.ts
-import { apiClient } from './client'
+import { apiClient, API_BASE_URL } from './client'
 
 // World Foundation
 export interface WorldFoundation {
@@ -623,22 +623,30 @@ export const generationApi = {
     return response.data
   },
 
-  async generateDraft(projectId: string, chapterId: string, styleProfileId?: string): Promise<ReadableStream> {
-    const url = `/projects/${projectId}/chapters/${chapterId}/generate/draft${styleProfileId ? `?styleProfileId=${styleProfileId}` : ''}`
-    const response = await fetch(`http://localhost:3001${url}`, {
+  async generateDraft(projectId: string, chapterId: string, styleProfileId?: string): Promise<ReadableStream<Uint8Array>> {
+    const url = `${API_BASE_URL}/projects/${projectId}/chapters/${chapterId}/generate/draft${styleProfileId ? `?styleProfileId=${styleProfileId}` : ''}`
+    const response = await fetch(url, {
       method: 'GET',
       headers: { 'Content-Type': 'text/event-stream' },
     })
-    return response.body!
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(`Draft generation failed (${response.status}). ${detail}`)
+    }
+    return response.body
   },
 
-  async generateStylePass(projectId: string, chapterId: string, styleProfileId: string): Promise<ReadableStream> {
-    const url = `/projects/${projectId}/chapters/${chapterId}/generate/style?styleProfileId=${styleProfileId}`
-    const response = await fetch(`http://localhost:3001${url}`, {
+  async generateStylePass(projectId: string, chapterId: string, styleProfileId: string): Promise<ReadableStream<Uint8Array>> {
+    const url = `${API_BASE_URL}/projects/${projectId}/chapters/${chapterId}/generate/style?styleProfileId=${styleProfileId}`
+    const response = await fetch(url, {
       method: 'GET',
       headers: { 'Content-Type': 'text/event-stream' },
     })
-    return response.body!
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(`Style pass failed (${response.status}). ${detail}`)
+    }
+    return response.body
   },
 
   async checkContinuity(projectId: string, chapterId: string, content: string): Promise<{ success: boolean; issues: ContinuityIssue[] }> {

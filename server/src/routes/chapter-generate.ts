@@ -1,6 +1,6 @@
 // server/src/routes/chapter-generate.ts
 import { Router } from 'express'
-import { OllamaService } from '../services/llmService'
+import { llmService } from '../services/llmService'
 import { contextAssemblyEngine } from '../services/contextAssemblyEngine'
 import { db, eq } from '../db'
 import { chapters, chapterVersions, styleProfiles, characters, locations, stateSnapshots, projects } from '../db/schema'
@@ -9,7 +9,6 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 const router = Router()
-const llmService = new OllamaService()
 
 const PROMPTS_DIR = path.join(__dirname, '../prompts')
 
@@ -24,6 +23,99 @@ function substituteTemplate(template: string, vars: Record<string, string>): str
     result = result.replace(new RegExp(`{{${key}}}`, 'g'), value)
   }
   return result
+}
+
+// Snapshot generation is shared by the /generate/snapshot and /finalize endpoints.
+const SNAPSHOT_SYSTEM_PROMPT =
+  'Extract story state changes. Return ONLY valid JSON with keys: worldChanges (array), newCanonFacts (array), characterStates (array of {characterName, location, condition, emotionalState, activeGoals, newKnowledge}), locationStates (array of {locationName, currentOccupants, condition, activeEvents}), openThreads (array of {name, urgency, lastDevelopment}).'
+
+interface SnapshotData {
+  worldChanges: string[]
+  newCanonFacts: string[]
+  characterStates: any[]
+  locationStates: any[]
+  openThreads: any[]
+}
+
+// Builds a state snapshot from chapter content via the LLM and upserts it
+// (state_snapshots.chapterId is UNIQUE, so this must update-or-insert).
+async function generateAndStoreSnapshot(
+  projectId: string,
+  chapter: { id: string; number: number; title: string | null },
+  content: string,
+  characterIds: string[],
+  locationIds: string[],
+): Promise<SnapshotData> {
+  // The previous chapter's snapshot gives the model continuity context.
+  const prevChapter = await db.select({ id: chapters.id, number: chapters.number })
+    .from(chapters)
+    .where(eq(chapters.projectId, projectId))
+    .orderBy(chapters.number)
+    .all()
+    .then(chs => chs.find(ch => ch.number === chapter.number - 1))
+
+  const prevSnapshot = prevChapter
+    ? await db.select().from(stateSnapshots).where(eq(stateSnapshots.chapterId, prevChapter.id)).get()
+    : null
+
+  const chars = await db.select({ id: characters.id, name: characters.name })
+    .from(characters).where(eq(characters.projectId, projectId)).all()
+  const locs = await db.select({ id: locations.id, name: locations.name })
+    .from(locations).where(eq(locations.projectId, projectId)).all()
+
+  const charNames = chars.filter(c => characterIds.includes(c.id)).map(c => c.name).join(', ')
+  const locNames = locs.filter(l => locationIds.includes(l.id)).map(l => l.name).join(', ')
+
+  const prompt = substituteTemplate(loadPrompt('snapshot-assist'), {
+    chapterNumber: chapter.number.toString(),
+    chapterTitle: chapter.title || `Chapter ${chapter.number}`,
+    chapter: '',
+    prevWorldChanges: prevSnapshot ? JSON.parse(prevSnapshot.worldChanges || '[]').join('; ') : 'None yet',
+    prevCanonFacts: prevSnapshot ? JSON.parse(prevSnapshot.newCanonFacts || '[]').join('; ') : 'None yet',
+    characters: charNames || 'All characters in project',
+    locations: locNames || 'All locations in project',
+    content: content.slice(0, 12000),
+  })
+
+  const response = await llmService.complete({
+    systemPrompt: SNAPSHOT_SYSTEM_PROMPT,
+    userPrompt: prompt,
+    maxTokens: 3000,
+    temperature: 0.3,
+  })
+
+  const jsonMatch = response.match(/\{[\s\S]*\}/)
+  const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {}
+  const extracted: SnapshotData = {
+    worldChanges: parsed.worldChanges || [],
+    newCanonFacts: parsed.newCanonFacts || [],
+    characterStates: parsed.characterStates || [],
+    locationStates: parsed.locationStates || [],
+    openThreads: parsed.openThreads || [],
+  }
+
+  const snapshotValues = {
+    characterStates: JSON.stringify(extracted.characterStates),
+    locationStates: JSON.stringify(extracted.locationStates),
+    openThreads: JSON.stringify(extracted.openThreads),
+    newCanonFacts: JSON.stringify(extracted.newCanonFacts),
+    worldChanges: JSON.stringify(extracted.worldChanges),
+  }
+
+  const existing = await db.select().from(stateSnapshots).where(eq(stateSnapshots.chapterId, chapter.id)).get()
+  if (existing) {
+    await db.update(stateSnapshots).set(snapshotValues).where(eq(stateSnapshots.chapterId, chapter.id))
+  } else {
+    await db.insert(stateSnapshots).values({
+      id: nanoid(),
+      chapterId: chapter.id,
+      chapterNumber: chapter.number,
+      ...snapshotValues,
+      createdAt: new Date().toISOString(),
+    })
+  }
+
+  return extracted
 }
 
 // POST /projects/:projectId/chapters/:chapterId/generate/outline - Generate scene outline
@@ -113,6 +205,8 @@ router.get('/projects/:projectId/chapters/:chapterId/generate/draft', async (req
     if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
     if (!chapter.outline) return res.status(400).json({ error: 'Chapter outline required' })
 
+    const project = await db.select().from(projects).where(eq(projects.id, projectId)).get()
+
     // Set up SSE
     res.setHeader('Content-Type', 'text/event-stream')
     res.setHeader('Cache-Control', 'no-cache')
@@ -137,7 +231,7 @@ router.get('/projects/:projectId/chapters/:chapterId/generate/draft', async (req
       chapterNumber: chapter.number.toString(),
       chapterTitle: chapter.title || `Chapter ${chapter.number}`,
       wordCount: (chapter.wordCount || 2000).toString(),
-      pov: chapter.title || 'third-limited',
+      pov: project?.pov || 'third-limited',
       outline: chapter.outline,
       context: context.tier1 + '\n' + context.tier2,
       styleProfile,
@@ -368,96 +462,8 @@ router.post('/projects/:projectId/chapters/:chapterId/generate/snapshot', async 
     const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
     if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
 
-    // Get previous chapter's snapshot for context
-    const prevChapter = await db.select({ id: chapters.id, number: chapters.number })
-      .from(chapters)
-      .where(eq(chapters.projectId, projectId))
-      .orderBy(chapters.number)
-      .all()
-      .then(chs => chs.find(ch => ch.number === chapter.number - 1))
-
-    const prevSnapshot = prevChapter
-      ? await db.select().from(stateSnapshots).where(eq(stateSnapshots.chapterId, prevChapter.id)).get()
-      : null
-
-    // Get character and location names for the prompt
-    const chars = await db.select({ id: characters.id, name: characters.name })
-      .from(characters)
-      .where(eq(characters.projectId, projectId))
-      .all()
-    
-    const locs = await db.select({ id: locations.id, name: locations.name })
-      .from(locations)
-      .where(eq(locations.projectId, projectId))
-      .all()
-
-    const charNames = chars.filter(c => characterIds.includes(c.id)).map(c => c.name).join(', ')
-    const locNames = locs.filter(l => locationIds.includes(l.id)).map(l => l.name).join(', ')
-
-    const template = loadPrompt('snapshot-assist')
-    const prompt = substituteTemplate(template, {
-      chapterNumber: chapter.number.toString(),
-      chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      chapter: '',
-      prevWorldChanges: prevSnapshot ? JSON.parse(prevSnapshot.worldChanges || '[]').join('; ') : 'None yet',
-      prevCanonFacts: prevSnapshot ? JSON.parse(prevSnapshot.newCanonFacts || '[]').join('; ') : 'None yet',
-      characters: charNames || 'All characters in project',
-      locations: locNames || 'All locations in project',
-      content: content.slice(0, 12000),
-    })
-
-    const response = await llmService.complete({
-      systemPrompt: 'Extract story state changes. Return ONLY valid JSON with keys: worldChanges (array), newCanonFacts (array), characterStates (array of {characterName, location, condition, emotionalState, activeGoals, newKnowledge}), locationStates (array of {locationName, currentOccupants, condition, activeEvents}), openThreads (array of {name, urgency, lastDevelopment}).',
-      userPrompt: prompt,
-      maxTokens: 3000,
-      temperature: 0.3,
-    })
-
-    const jsonMatch = response.match(/\{[\s\S]*\}/)
-    const extracted = jsonMatch ? JSON.parse(jsonMatch[0]) : {
-      worldChanges: [],
-      newCanonFacts: [],
-      characterStates: [],
-      locationStates: [],
-      openThreads: [],
-    }
-
-    // Ensure arrays exist
-    extracted.worldChanges = extracted.worldChanges || []
-    extracted.newCanonFacts = extracted.newCanonFacts || []
-    extracted.characterStates = extracted.characterStates || []
-    extracted.locationStates = extracted.locationStates || []
-    extracted.openThreads = extracted.openThreads || []
-
-    // Create or update snapshot
-    const existing = await db.select()
-      .from(stateSnapshots)
-      .where(eq(stateSnapshots.chapterId, chapterId))
-      .get()
-
-    if (existing) {
-      await db.update(stateSnapshots).set({
-        characterStates: JSON.stringify(extracted.characterStates),
-        locationStates: JSON.stringify(extracted.locationStates),
-        openThreads: JSON.stringify(extracted.openThreads),
-        newCanonFacts: JSON.stringify(extracted.newCanonFacts),
-        worldChanges: JSON.stringify(extracted.worldChanges),
-      }).where(eq(stateSnapshots.chapterId, chapterId))
-    } else {
-      await db.insert(stateSnapshots).values({
-        id: nanoid(),
-        chapterId,
-        chapterNumber: chapter.number,
-        characterStates: JSON.stringify(extracted.characterStates),
-        locationStates: JSON.stringify(extracted.locationStates),
-        openThreads: JSON.stringify(extracted.openThreads),
-        newCanonFacts: JSON.stringify(extracted.newCanonFacts),
-        worldChanges: JSON.stringify(extracted.worldChanges),
-        createdAt: new Date().toISOString(),
-      })
-    }
-
-    res.json({ success: true, snapshot: extracted })
+    const snapshot = await generateAndStoreSnapshot(projectId, chapter, content, characterIds, locationIds)
+    res.json({ success: true, snapshot })
   } catch (error) {
     console.error('Error generating snapshot:', error)
     res.status(500).json({ error: 'Failed to generate snapshot' })
@@ -495,91 +501,12 @@ router.post('/projects/:projectId/chapters/:chapterId/finalize', async (req, res
       return res.status(400).json({ error: 'No chapter content to finalize' })
     }
 
-    // Generate snapshot
-    const snapshotReq = {
-      params: { projectId, chapterId },
-      body: { content: latestVersion.content, characterIds, locationIds },
-    }
-
-    // Call snapshot generation internally
     const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
     if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
 
-    // Get previous chapter's snapshot for context
-    const prevChapter = await db.select({ id: chapters.id, number: chapters.number })
-      .from(chapters)
-      .where(eq(chapters.projectId, projectId))
-      .orderBy(chapters.number)
-      .all()
-      .then(chs => chs.find(ch => ch.number === chapter.number - 1))
+    const snapshot = await generateAndStoreSnapshot(projectId, chapter, latestVersion.content, characterIds, locationIds)
 
-    const prevSnapshot = prevChapter
-      ? await db.select().from(stateSnapshots).where(eq(stateSnapshots.chapterId, prevChapter.id)).get()
-      : null
-
-    // Get character and location names
-    const chars = await db.select({ id: characters.id, name: characters.name })
-      .from(characters)
-      .where(eq(characters.projectId, projectId))
-      .all()
-    
-    const locs = await db.select({ id: locations.id, name: locations.name })
-      .from(locations)
-      .where(eq(locations.projectId, projectId))
-      .all()
-
-    const charNames = chars.filter(c => characterIds.includes(c.id)).map(c => c.name).join(', ')
-    const locNames = locs.filter(l => locationIds.includes(l.id)).map(l => l.name).join(', ')
-
-    const template = loadPrompt('snapshot-assist')
-    const prompt = substituteTemplate(template, {
-      chapterNumber: chapter.number.toString(),
-      chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      chapter: '',
-      prevWorldChanges: prevSnapshot ? JSON.parse(prevSnapshot.worldChanges || '[]').join('; ') : 'None yet',
-      prevCanonFacts: prevSnapshot ? JSON.parse(prevSnapshot.newCanonFacts || '[]').join('; ') : 'None yet',
-      characters: charNames || 'All characters in project',
-      locations: locNames || 'All locations in project',
-      content: latestVersion.content.slice(0, 12000),
-    })
-
-    const response = await llmService.complete({
-      systemPrompt: 'Extract story state changes. Return ONLY valid JSON.',
-      userPrompt: prompt,
-      maxTokens: 3000,
-      temperature: 0.3,
-    })
-
-    const jsonMatch = response.match(/\{[\s\S]*\}/)
-    const extracted = jsonMatch ? JSON.parse(jsonMatch[0]) : {
-      worldChanges: [],
-      newCanonFacts: [],
-      characterStates: [],
-      locationStates: [],
-      openThreads: [],
-    }
-
-    // Ensure arrays exist
-    extracted.worldChanges = extracted.worldChanges || []
-    extracted.newCanonFacts = extracted.newCanonFacts || []
-    extracted.characterStates = extracted.characterStates || []
-    extracted.locationStates = extracted.locationStates || []
-    extracted.openThreads = extracted.openThreads || []
-
-    // Create snapshot
-    await db.insert(stateSnapshots).values({
-      id: nanoid(),
-      chapterId,
-      chapterNumber: chapter.number,
-      characterStates: JSON.stringify(extracted.characterStates),
-      locationStates: JSON.stringify(extracted.locationStates),
-      openThreads: JSON.stringify(extracted.openThreads),
-      newCanonFacts: JSON.stringify(extracted.newCanonFacts),
-      worldChanges: JSON.stringify(extracted.worldChanges),
-      createdAt: new Date().toISOString(),
-    })
-
-    // Update chapter status
+    // Mark the chapter as finalized
     await db.update(chapters)
       .set({ status: 'final', updatedAt: new Date().toISOString() })
       .where(eq(chapters.id, chapterId))
@@ -589,7 +516,7 @@ router.post('/projects/:projectId/chapters/:chapterId/finalize', async (req, res
     try {
       const { kbService } = await import('../services/kbService.js')
       const existingKB = await kbService.search(projectId, '')
-      
+
       const updates = await kbService.analyzeChapterForKBUpdates(
         projectId,
         latestVersion.content,
@@ -611,9 +538,9 @@ router.post('/projects/:projectId/chapters/:chapterId/finalize', async (req, res
       // Don't fail the request if KB evolution fails
     }
 
-    res.json({ 
-      success: true, 
-      snapshot: extracted,
+    res.json({
+      success: true,
+      snapshot,
       kbEvolution: kbEvolutionResult,
     })
   } catch (error) {

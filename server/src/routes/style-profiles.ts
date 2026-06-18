@@ -3,12 +3,11 @@ import { Router } from 'express'
 import { nanoid } from 'nanoid'
 import { db, eq } from '../db'
 import { styleProfiles } from '../db/schema'
-import { OllamaService } from '../services/llmService'
+import { llmService } from '../services/llmService'
 import fs from 'fs'
 import path from 'path'
 
 const router = Router()
-const llmService = new OllamaService()
 
 // Ensure data directory exists
 const DATA_DIR = process.env.DATA_DIR || './data'

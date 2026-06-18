@@ -1,12 +1,14 @@
 // client/src/pages/ProjectDetail.tsx
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { useProject } from '../store/projects'
 import { apiClient, projectsApi } from '../api/client'
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [editingTarget, setEditingTarget] = useState(false)
   const [targetWordCount, setTargetWordCount] = useState<number>()
   const [editingSettings, setEditingSettings] = useState(false)
@@ -45,7 +47,7 @@ export default function ProjectDetail() {
     try {
       await apiClient.put(`/projects/${id}`, { targetWordCount })
       setEditingTarget(false)
-      window.location.reload() // Refresh to get updated data
+      queryClient.invalidateQueries({ queryKey: ['project', id] })
     } catch (error) {
       console.error('Failed to update target word count:', error)
       alert('Failed to update target word count')
@@ -69,7 +71,7 @@ export default function ProjectDetail() {
     try {
       await projectsApi.updateSettings(id, settings)
       setEditingSettings(false)
-      window.location.reload()
+      queryClient.invalidateQueries({ queryKey: ['project', id] })
     } catch (error) {
       console.error('Failed to update settings:', error)
       alert('Failed to update settings')

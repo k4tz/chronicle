@@ -26,6 +26,9 @@ router.post('/projects/:projectId/lore', async (req, res) => {
   try {
     const { projectId } = req.params
     const data = req.body
+    if (!data?.category || !data?.title || !data?.content) {
+      return res.status(400).json({ error: 'Lore entry requires category, title, and content' })
+    }
     const now = new Date().toISOString()
     const id = nanoid()
 

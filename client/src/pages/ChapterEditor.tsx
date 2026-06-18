@@ -2,10 +2,11 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-  chaptersApi, charactersApi, locationsApi,
-  Chapter, ChapterVersion, Character, Location,
+  chaptersApi, charactersApi, locationsApi, styleProfilesApi,
+  Chapter, ChapterVersion, Character, Location, StyleProfileRecord,
   CharacterState, LocationState, OpenThread
 } from '../api/api'
+import GenerationPanel from '../components/GenerationPanel'
 
 export default function ChapterEditorPage() {
   const { projectId, chapterId } = useParams<{ projectId: string; chapterId: string }>()
@@ -16,11 +17,13 @@ export default function ChapterEditorPage() {
   const [versions, setVersions] = useState<ChapterVersion[]>([])
   const [characters, setCharacters] = useState<Character[]>([])
   const [locations, setLocations] = useState<Location[]>([])
+  const [styleProfiles, setStyleProfiles] = useState<StyleProfileRecord[]>([])
 
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
   const [showSnapshot, setShowSnapshot] = useState(false)
   const [showVersions, setShowVersions] = useState(false)
+  const [showGenerate, setShowGenerate] = useState(false)
 
   // Snapshot form state
   const [charStates, setCharStates] = useState<Record<string, CharacterState>>({})
@@ -38,9 +41,11 @@ export default function ChapterEditorPage() {
       chaptersApi.get(projectId, chapterId),
       charactersApi.list(projectId),
       locationsApi.list(projectId),
-    ]).then(([chapterData, chars, locs]) => {
+      styleProfilesApi.list(projectId),
+    ]).then(([chapterData, chars, locs, profiles]) => {
       setChapter(chapterData.chapter)
       setVersions(chapterData.versions)
+      setStyleProfiles(profiles)
 
       // Get latest version content
       if (chapterData.versions.length > 0) {
@@ -115,6 +120,21 @@ export default function ChapterEditorPage() {
     }
   }
 
+  // Called by GenerationPanel after each pass. The server already persisted a
+  // version; reflect the new text in the editor and refresh version/status info
+  // without clobbering the freshly generated content.
+  const handleGenerated = async (newContent: string) => {
+    setContent(newContent)
+    if (!projectId || !chapterId) return
+    try {
+      const data = await chaptersApi.get(projectId, chapterId)
+      setChapter(data.chapter)
+      setVersions(data.versions)
+    } catch (error) {
+      console.error('Failed to refresh chapter after generation:', error)
+    }
+  }
+
   const handleSaveSnapshot = async () => {
     if (!projectId || !chapterId) return
     try {
@@ -178,6 +198,12 @@ export default function ChapterEditorPage() {
             ← Back to Chapters
           </button>
           <button
+            onClick={() => setShowGenerate(!showGenerate)}
+            className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+          >
+            🤖 Generate
+          </button>
+          <button
             onClick={() => setShowVersions(!showVersions)}
             className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
           >
@@ -199,13 +225,26 @@ export default function ChapterEditorPage() {
         </div>
       </div>
 
+      {/* AI Generation Panel */}
+      {showGenerate && (
+        <div className="mb-6">
+          <GenerationPanel
+            projectId={projectId!}
+            chapterId={chapterId!}
+            styleProfiles={styleProfiles}
+            currentContent={content}
+            onGenerate={handleGenerated}
+          />
+        </div>
+      )}
+
       {/* Version History Drawer */}
       {showVersions && (
-        <div className="mb-6 bg-white p-4 rounded-lg shadow">
+        <div className="mb-6 bg-white dark:bg-gray-800 p-4 rounded-lg shadow">
           <h3 className="font-semibold mb-3">Chapter Versions</h3>
           <div className="space-y-2 max-h-64 overflow-y-auto">
             {versions.map((v) => (
-              <div key={v.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+              <div key={v.id} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
                 <div>
                   <span className="font-medium">{v.passType}</span>
                   <span className="text-gray-500 text-sm ml-2">
@@ -227,7 +266,7 @@ export default function ChapterEditorPage() {
 
       {/* State Snapshot Drawer */}
       {showSnapshot && (
-        <div className="mb-6 bg-white p-6 rounded-lg shadow space-y-6">
+        <div className="mb-6 bg-white dark:bg-gray-800 p-6 rounded-lg shadow space-y-6">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold text-lg">State Snapshot - Chapter {chapter.number}</h3>
             <button onClick={handleSaveSnapshot} className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700">
@@ -240,7 +279,7 @@ export default function ChapterEditorPage() {
             <h4 className="font-medium mb-3">Character States</h4>
             <div className="grid gap-4 md:grid-cols-2">
               {characters.map(char => (
-                <div key={char.id} className="border rounded p-4">
+                <div key={char.id} className="border dark:border-gray-700 rounded p-4">
                   <p className="font-medium">{char.name}</p>
                   <div className="mt-2 space-y-2">
                     <div>
@@ -248,7 +287,7 @@ export default function ChapterEditorPage() {
                       <select
                         value={charStates[char.id]?.location || ''}
                         onChange={(e) => updateCharState(char.id, 'location', e.target.value)}
-                        className="w-full px-2 py-1 border rounded text-sm"
+                        className="w-full px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                       >
                         <option value="">Unknown</option>
                         {locations.map(l => <option key={l.id} value={l.name}>{l.name}</option>)}
@@ -259,7 +298,7 @@ export default function ChapterEditorPage() {
                       <select
                         value={charStates[char.id]?.condition || 'normal'}
                         onChange={(e) => updateCharState(char.id, 'condition', e.target.value)}
-                        className="w-full px-2 py-1 border rounded text-sm"
+                        className="w-full px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                       >
                         <option value="normal">Normal</option>
                         <option value="injured">Injured</option>
@@ -273,7 +312,7 @@ export default function ChapterEditorPage() {
                         type="text"
                         value={charStates[char.id]?.emotionalState || ''}
                         onChange={(e) => updateCharState(char.id, 'emotionalState', e.target.value)}
-                        className="w-full px-2 py-1 border rounded text-sm"
+                        className="w-full px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                         placeholder="e.g., Anxious, Determined"
                       />
                     </div>
@@ -288,7 +327,7 @@ export default function ChapterEditorPage() {
             <h4 className="font-medium mb-3">Location States</h4>
             <div className="grid gap-4 md:grid-cols-2">
               {locations.map(loc => (
-                <div key={loc.id} className="border rounded p-4">
+                <div key={loc.id} className="border dark:border-gray-700 rounded p-4">
                   <p className="font-medium">{loc.name}</p>
                   <div className="mt-2 space-y-2">
                     <div>
@@ -297,7 +336,7 @@ export default function ChapterEditorPage() {
                         type="text"
                         value={locStates[loc.id]?.condition || ''}
                         onChange={(e) => updateLocState(loc.id, 'condition', e.target.value)}
-                        className="w-full px-2 py-1 border rounded text-sm"
+                        className="w-full px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                         placeholder="e.g., Intact, Damaged"
                       />
                     </div>
@@ -307,7 +346,7 @@ export default function ChapterEditorPage() {
                         type="text"
                         value={locStates[loc.id]?.activeEvents.join(', ') || ''}
                         onChange={(e) => updateLocState(loc.id, 'activeEvents', e.target.value.split(',').map(s => s.trim()))}
-                        className="w-full px-2 py-1 border rounded text-sm"
+                        className="w-full px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                         placeholder="e.g., Battle, Celebration"
                       />
                     </div>
@@ -322,7 +361,7 @@ export default function ChapterEditorPage() {
             <h4 className="font-medium mb-3">Active Plot Threads</h4>
             <div className="grid gap-4 md:grid-cols-2">
               {Object.values(threadStates).map(thread => (
-                <div key={thread.threadId} className="border rounded p-4">
+                <div key={thread.threadId} className="border dark:border-gray-700 rounded p-4">
                   <p className="font-medium">{thread.name}</p>
                   <div className="mt-2 space-y-2">
                     <div>
@@ -330,7 +369,7 @@ export default function ChapterEditorPage() {
                       <select
                         value={thread.urgency}
                         onChange={(e) => updateThreadState(thread.threadId, 'urgency', parseInt(e.target.value))}
-                        className="w-full px-2 py-1 border rounded text-sm"
+                        className="w-full px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                       >
                         <option value={1}>Low</option>
                         <option value={2}>Medium</option>
@@ -343,7 +382,7 @@ export default function ChapterEditorPage() {
                         type="text"
                         value={thread.lastDevelopment}
                         onChange={(e) => updateThreadState(thread.threadId, 'lastDevelopment', e.target.value)}
-                        className="w-full px-2 py-1 border rounded text-sm"
+                        className="w-full px-2 py-1 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                         placeholder="Brief update"
                       />
                     </div>
@@ -360,7 +399,7 @@ export default function ChapterEditorPage() {
               <textarea
                 value={newCanonFacts}
                 onChange={(e) => setNewCanonFacts(e.target.value)}
-                className="w-full px-3 py-2 border rounded text-sm"
+                className="w-full px-3 py-2 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                 rows={4}
                 placeholder="One fact per line..."
               />
@@ -370,7 +409,7 @@ export default function ChapterEditorPage() {
               <textarea
                 value={worldChanges}
                 onChange={(e) => setWorldChanges(e.target.value)}
-                className="w-full px-3 py-2 border rounded text-sm"
+                className="w-full px-3 py-2 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
                 rows={4}
                 placeholder="One change per line..."
               />
@@ -380,12 +419,12 @@ export default function ChapterEditorPage() {
       )}
 
       {/* Chapter Editor */}
-      <div className="bg-white rounded-lg shadow">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
         <textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
           placeholder="Start writing your chapter..."
-          className="w-full h-[600px] px-6 py-4 border-0 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg resize-none font-serif text-lg leading-relaxed"
+          className="w-full h-[600px] px-6 py-4 border-0 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg resize-none font-serif text-lg leading-relaxed bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
         />
       </div>
 

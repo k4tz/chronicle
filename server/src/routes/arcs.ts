@@ -27,6 +27,9 @@ router.post('/projects/:projectId/arcs', async (req, res) => {
   try {
     const { projectId } = req.params
     const data = req.body
+    if (!data?.name || typeof data.name !== 'string' || !data.name.trim()) {
+      return res.status(400).json({ error: 'Story arc name is required' })
+    }
     const id = nanoid()
 
     // Get max order index

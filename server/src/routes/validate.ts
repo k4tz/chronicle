@@ -1,11 +1,10 @@
 // server/src/routes/validate.ts
 import { Router } from 'express'
-import { OllamaService } from '../services/llmService'
+import { llmService } from '../services/llmService'
 import { db, eq } from '../db'
 import { worldFoundations, characters, locations, loreEntries } from '../db/schema'
 
 const router = Router()
-const llmService = new OllamaService()
 
 // Helper to extract JSON array from LLM response
 function extractJsonArrayFromResponse(response: string): any[] {

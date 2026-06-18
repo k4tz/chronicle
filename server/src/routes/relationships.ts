@@ -1,6 +1,7 @@
 // server/src/routes/relationships.ts
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
+import { or, inArray } from 'drizzle-orm'
 import { db, eq } from '../db'
 import { relationships, characters } from '../db/schema'
 
@@ -9,22 +10,24 @@ const router = Router()
 // GET /api/projects/:projectId/relationships - List all relationships
 router.get('/projects/:projectId/relationships', async (req, res) => {
   try {
-    // Join with characters to get names
-    const result = await db
-      .select()
-      .from(relationships)
-      .all()
-    
-    // Filter by project (need to join with characters)
+    // Relationships belong to a project via their characters.
     const projectChars = await db
-      .select({ id: characters.id, projectId: characters.projectId })
+      .select({ id: characters.id })
       .from(characters)
       .where(eq(characters.projectId, req.params.projectId))
       .all()
-    
-    const charIds = new Set(projectChars.map(c => c.id))
-    const filtered = result.filter(r => charIds.has(r.fromCharId) || charIds.has(r.toCharId))
-    
+
+    const charIds = projectChars.map(c => c.id)
+    if (charIds.length === 0) {
+      return res.json([])
+    }
+
+    const filtered = await db
+      .select()
+      .from(relationships)
+      .where(or(inArray(relationships.fromCharId, charIds), inArray(relationships.toCharId, charIds)))
+      .all()
+
     res.json(filtered)
   } catch (error) {
     console.error('Error fetching relationships:', error)
@@ -36,6 +39,9 @@ router.get('/projects/:projectId/relationships', async (req, res) => {
 router.post('/projects/:projectId/relationships', async (req, res) => {
   try {
     const data = req.body
+    if (!data?.fromCharId || !data?.toCharId || !data?.type) {
+      return res.status(400).json({ error: 'Relationship requires fromCharId, toCharId, and type' })
+    }
     const id = nanoid()
 
     await db.insert(relationships).values({

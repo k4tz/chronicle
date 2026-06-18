@@ -2,9 +2,12 @@
 import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { chaptersApi, charactersApi, Chapter, Character } from '../api/api'
+import { useProject } from '../store/projects'
 
 export default function AnalyticsPage() {
   const { projectId } = useParams<{ projectId: string }>()
+  const { data: projectData } = useProject(projectId ?? null)
+  const goal = projectData?.project.targetWordCount || 100000
   const [loading, setLoading] = useState(true)
   const [chapters, setChapters] = useState<Chapter[]>([])
   const [characters, setCharacters] = useState<Character[]>([])
@@ -72,13 +75,13 @@ export default function AnalyticsPage() {
           <h3 className="text-lg font-semibold mb-4">Word Count Goal</h3>
           <div className="text-center">
             <div className="text-4xl font-bold text-blue-600 dark:text-blue-400 mb-2">
-              {Math.round((stats.totalWords / 100000) * 100)}%
+              {goal > 0 ? Math.round((stats.totalWords / goal) * 100) : 0}%
             </div>
-            <p className="text-gray-600 dark:text-gray-400">of 100,000 words</p>
+            <p className="text-gray-600 dark:text-gray-400">of {goal.toLocaleString()} words</p>
             <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-4 mt-4">
               <div
                 className="bg-blue-600 dark:bg-blue-500 h-4 rounded-full transition-all"
-                style={{ width: `${Math.min((stats.totalWords / 100000) * 100, 100)}%` }}
+                style={{ width: `${goal > 0 ? Math.min((stats.totalWords / goal) * 100, 100) : 0}%` }}
               />
             </div>
           </div>

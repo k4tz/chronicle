@@ -17,12 +17,6 @@ router.get('/projects/:projectId/context', async (req, res) => {
       recentChapters,
     } = req.query
 
-    console.log('=== CONTEXT ROUTE DEBUG ===')
-    console.log('Project ID:', projectId)
-    console.log('Char IDs:', charIds)
-    console.log('contextAssemblyEngine type:', typeof contextAssemblyEngine)
-    console.log('assembleContext method:', typeof contextAssemblyEngine.assembleContext)
-
     const context = await contextAssemblyEngine.assembleContext(projectId, {
       chapterId: chapterId as string,
       chapterNumber: chapterNumber ? parseInt(chapterNumber as string) : undefined,
@@ -31,9 +25,6 @@ router.get('/projects/:projectId/context', async (req, res) => {
       relevantThreadIds: threadIds ? (threadIds as string).split(',') : [],
       includeRecentChapters: recentChapters ? parseInt(recentChapters as string) : 3,
     })
-
-    console.log('Context result:', JSON.stringify(context, null, 2))
-    console.log('=== END DEBUG ===')
 
     res.json(context)
   } catch (error) {

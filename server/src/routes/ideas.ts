@@ -1,6 +1,6 @@
 // server/src/routes/ideas.ts
 import { Router } from 'express'
-import { nanoid } from 'nanoid'
+import { or, isNull } from 'drizzle-orm'
 import { db, eq } from '../db'
 import { ideas } from '../db/schema'
 import { ideasService } from '../services/ideasService'
@@ -10,16 +10,12 @@ const router = Router()
 // GET /api/projects/:projectId/ideas - List all ideas (project-specific + global)
 router.get('/projects/:projectId/ideas', async (req, res) => {
   try {
-    const result = await db
+    const filtered = await db
       .select()
       .from(ideas)
+      .where(or(eq(ideas.projectId, req.params.projectId), isNull(ideas.projectId)))
       .all()
-    
-    // Filter to project-specific and global (null projectId)
-    const filtered = result.filter(idea => 
-      idea.projectId === req.params.projectId || idea.projectId === null
-    )
-    
+
     // Parse linked entities and inspirationFor
     const parsed = filtered.map(idea => ({
       ...idea,
@@ -37,14 +33,12 @@ router.get('/projects/:projectId/ideas', async (req, res) => {
 // GET /api/ideas - List all global ideas (top-level)
 router.get('/ideas', async (req, res) => {
   try {
-    const result = await db
+    const filtered = await db
       .select()
       .from(ideas)
+      .where(isNull(ideas.projectId))
       .all()
-    
-    // Filter to global ideas only (null projectId)
-    const filtered = result.filter(idea => idea.projectId === null)
-    
+
     const parsed = filtered.map(idea => ({
       ...idea,
       linkedEntities: idea.linkedEntities ? JSON.parse(idea.linkedEntities) : null,
@@ -63,8 +57,9 @@ router.post('/projects/:projectId/ideas', async (req, res) => {
   try {
     const { projectId } = req.params
     const data = req.body
-    const now = new Date().toISOString()
-    const id = nanoid()
+    if (!data?.title || typeof data.title !== 'string' || !data.title.trim()) {
+      return res.status(400).json({ error: 'Idea title is required' })
+    }
 
     const idea = await ideasService.createIdea({
       projectId: data.isGlobal ? null : projectId,
@@ -89,8 +84,9 @@ router.post('/projects/:projectId/ideas', async (req, res) => {
 router.post('/ideas', async (req, res) => {
   try {
     const data = req.body
-    const now = new Date().toISOString()
-    const id = nanoid()
+    if (!data?.title || typeof data.title !== 'string' || !data.title.trim()) {
+      return res.status(400).json({ error: 'Idea title is required' })
+    }
 
     const idea = await ideasService.createIdea({
       projectId: null,  // Global idea

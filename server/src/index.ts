@@ -1,9 +1,8 @@
 // server/src/index.ts
-import express, { Request, Response } from 'express'
+import express from 'express'
 import cors from 'cors'
-import { LruCacheService } from './services/cacheService'
-import { OllamaService } from './services/llmService'
-import { db } from './db'
+import { llmService } from './services/llmService'
+import { dbReady } from './db'
 
 // Load environment variables from .env file
 import 'dotenv/config'
@@ -33,12 +32,9 @@ const app = express()
 const PORT = process.env.PORT || 3001
 
 // Middleware
-app.use(cors({ origin: 'http://localhost:5173' }))
-app.use(express.json())
-
-// Services
-const cacheService = new LruCacheService()
-const llmService = new OllamaService()
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }))
+// Chapters and pasted style samples can be large; default 100kb is too small.
+app.use(express.json({ limit: '5mb' }))
 
 // Health check
 app.get('/api/health', (req, res) => {
@@ -109,9 +105,11 @@ app.use('/api', exportRoutes.app)
 // Timeline routes
 app.use('/api', timelineRoutes.app)
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Chronicle server running on http://localhost:${PORT}`)
+// Start server once foreign keys are enabled
+dbReady.then(() => {
+  app.listen(PORT, () => {
+    console.log(`Chronicle server running on http://localhost:${PORT}`)
+  })
 })
 
 export default app

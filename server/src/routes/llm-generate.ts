@@ -1,13 +1,13 @@
 // server/src/routes/llm-generate.ts
 import { Router } from 'express'
-import { OllamaService } from '../services/llmService'
+import { llmService } from '../services/llmService'
+import type { GenerationRequest } from '../types/services'
 import { ideasService } from '../services/ideasService'
 import { db, eq } from '../db'
 import { worldFoundations, characters, locations } from '../db/schema'
 import { nanoid } from 'nanoid'
 
 const router = Router()
-const llmService = new OllamaService()
 
 // GET /api/llm/config - Get LLM configuration including context sizes
 router.get('/llm/config', (req, res) => {
@@ -58,6 +58,55 @@ function extractJsonFromResponse(response: string): any {
   }
   
   throw new Error('No valid JSON found in response')
+}
+
+// Coerce any LLM-returned value (string, array, or object) into a flat string.
+function normalizeString(val: any, defaultVal: string = ''): string {
+  if (val === null || val === undefined) return defaultVal
+  if (typeof val === 'string') return val.trim()
+  if (Array.isArray(val)) {
+    return val
+      .map(v => {
+        if (typeof v === 'string') return v.trim()
+        if (typeof v === 'object' && v !== null) {
+          return Object.entries(v).map(([k, v2]) => `${k}: ${v2}`).join(', ')
+        }
+        return String(v)
+      })
+      .filter(Boolean)
+      .join(', ')
+  }
+  if (typeof val === 'object') {
+    try {
+      return Object.entries(val).map(([k, v]) => `${k}: ${v}`).join(', ')
+    } catch {
+      return JSON.stringify(val)
+    }
+  }
+  return String(val).trim()
+}
+
+// Calls the LLM, retrying on empty responses or transient errors (with backoff).
+async function completeWithRetry(req: GenerationRequest, label: string, maxRetries = 3): Promise<string> {
+  let lastError: Error | null = null
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await llmService.complete(req)
+      if (response && response.trim().length > 0) {
+        return response
+      }
+      lastError = new Error('Empty response from LLM')
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      console.warn(`${label} attempt ${attempt} failed:`, lastError.message)
+      if (attempt === maxRetries) {
+        throw lastError
+      }
+      // Exponential backoff before the next attempt
+      await new Promise(resolve => setTimeout(resolve, 500 * attempt))
+    }
+  }
+  throw lastError || new Error('No response from LLM')
 }
 
 // POST /api/projects/:projectId/generate/world - Generate world from seed
@@ -121,9 +170,10 @@ Important: Do not include any thinking, reasoning, or explanation. Only output t
       })
     }
 
-    // Mark ideas as used
+    // Mark ideas as used (reference the actual world foundation row)
+    const savedWorld = await db.select({ id: worldFoundations.id }).from(worldFoundations).where(eq(worldFoundations.projectId, projectId)).get()
     for (const idea of allWorldIdeas) {
-      await ideasService.markIdeaAsUsed(idea.id, { type: 'world', id: existing?.id || 'new' })
+      await ideasService.markIdeaAsUsed(idea.id, { type: 'world', id: savedWorld?.id || projectId })
     }
 
     res.json({ success: true, world: worldData, ideasUsed: allWorldIdeas.length })
@@ -166,42 +216,12 @@ Fantasy novel setting. Make them compelling with depth.`
 
     userPrompt += '\n\nAll values must be strings (no arrays). Use commas for lists.'
 
-    // Retry logic for transient LLM failures
-    let response: string | undefined
-    let lastError: Error | null = null
-    const maxRetries = 3
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        response = await llmService.complete({
-          systemPrompt,
-          userPrompt,
-          maxTokens: 2500,
-          temperature: 0.8,
-        })
-
-        // Check if response is empty or whitespace only
-        if (response && response.trim().length > 0) {
-          break // Success
-        }
-
-        lastError = new Error('Empty response from LLM')
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error))
-        console.warn(`Character generation attempt ${attempt} failed:`, lastError.message)
-
-        if (attempt === maxRetries) {
-          throw lastError
-        }
-
-        // Wait before retry (exponential backoff)
-        await new Promise(resolve => setTimeout(resolve, 500 * attempt))
-      }
-    }
-
-    if (!response) {
-      throw lastError || new Error('No response from LLM')
-    }
+    const response = await completeWithRetry({
+      systemPrompt,
+      userPrompt,
+      maxTokens: 2500,
+      temperature: 0.8,
+    }, 'Character generation')
 
     const charData = extractJsonFromResponse(response)
 
@@ -212,34 +232,6 @@ Fantasy novel setting. Make them compelling with depth.`
 
     const id = nanoid()
     const now = new Date().toISOString()
-
-    // Helper to safely convert any value to string
-    const normalizeString = (val: any, defaultVal: string = ''): string => {
-      if (val === null || val === undefined) return defaultVal
-      if (typeof val === 'string') return val.trim()
-      if (Array.isArray(val)) {
-        return val
-          .map(v => {
-            if (typeof v === 'string') return v.trim()
-            if (typeof v === 'object' && v !== null) {
-              return Object.entries(v).map(([k, v2]) => `${k}: ${v2}`).join(', ')
-            }
-            return String(v)
-          })
-          .filter(Boolean)
-          .join(', ')
-      }
-      if (typeof val === 'object' && val !== null) {
-        try {
-          return Object.entries(val)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(', ')
-        } catch {
-          return JSON.stringify(val)
-        }
-      }
-      return String(val).trim()
-    }
 
     await db.insert(characters).values({
       id,
@@ -310,42 +302,12 @@ Fantasy novel setting. Make it vivid and immersive.`
 
     userPrompt += '\n\nAll values must be strings.'
 
-    // Retry logic for transient LLM failures
-    let response: string | undefined
-    let lastError: Error | null = null
-    const maxRetries = 3
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        response = await llmService.complete({
-          systemPrompt,
-          userPrompt,
-          maxTokens: 2000,
-          temperature: 0.8,
-        })
-
-        // Check if response is empty or whitespace only
-        if (response && response.trim().length > 0) {
-          break // Success
-        }
-
-        lastError = new Error('Empty response from LLM')
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error))
-        console.warn(`Location generation attempt ${attempt} failed:`, lastError.message)
-
-        if (attempt === maxRetries) {
-          throw lastError
-        }
-
-        // Wait before retry (exponential backoff)
-        await new Promise(resolve => setTimeout(resolve, 500 * attempt))
-      }
-    }
-
-    if (!response) {
-      throw lastError || new Error('No response from LLM')
-    }
+    const response = await completeWithRetry({
+      systemPrompt,
+      userPrompt,
+      maxTokens: 2000,
+      temperature: 0.8,
+    }, 'Location generation')
 
     const locData = extractJsonFromResponse(response)
 
@@ -356,34 +318,6 @@ Fantasy novel setting. Make it vivid and immersive.`
 
     const id = nanoid()
     const now = new Date().toISOString()
-
-    // Helper to safely convert any value to string
-    const normalizeString = (val: any, defaultVal: string = ''): string => {
-      if (val === null || val === undefined) return defaultVal
-      if (typeof val === 'string') return val.trim()
-      if (Array.isArray(val)) {
-        return val
-          .map(v => {
-            if (typeof v === 'string') return v.trim()
-            if (typeof v === 'object' && v !== null) {
-              return Object.entries(v).map(([k, v2]) => `${k}: ${v2}`).join(', ')
-            }
-            return String(v)
-          })
-          .filter(Boolean)
-          .join(', ')
-      }
-      if (typeof val === 'object' && val !== null) {
-        try {
-          return Object.entries(val)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(', ')
-        } catch {
-          return JSON.stringify(val)
-        }
-      }
-      return String(val).trim()
-    }
 
     await db.insert(locations).values({
       id,

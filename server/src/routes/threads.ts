@@ -26,6 +26,9 @@ router.post('/projects/:projectId/threads', async (req, res) => {
   try {
     const { projectId } = req.params
     const data = req.body
+    if (!data?.name || typeof data.name !== 'string' || !data.name.trim()) {
+      return res.status(400).json({ error: 'Plot thread name is required' })
+    }
     const now = new Date().toISOString()
     const id = nanoid()
 

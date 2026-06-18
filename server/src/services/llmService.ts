@@ -11,23 +11,17 @@ import fetch from 'node-fetch'
  */
 function stripThinkingTags(text: string): string {
   if (!text) return text
-  
+
   let result = text
-  
-  // Remove orphan thinking tags using string replacement (avoid regex issues with /)
-  // Remove </think> tags
-  result = result.split('</think>').join('')
-  // Remove </think> tags
-  result = result.split('</think>').join('')
-  // Remove <think> tags
-  result = result.split('<think>').join('')
-  
-  // Remove <thought>...</thought> blocks
+
+  // Remove complete reasoning blocks INCLUDING their inner content
+  result = result.replace(/<think>[\s\S]*?<\/think>/gi, '')
   result = result.replace(/<thought>[\s\S]*?<\/thought>/gi, '')
-  
-  // Remove <reasoning>...</reasoning> blocks
   result = result.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
-  
+
+  // Remove any orphaned tags left by truncated/streamed output
+  result = result.replace(/<\/?(?:think|thought|reasoning)>/gi, '')
+
   return result.trim()
 }
 
@@ -49,17 +43,25 @@ export class OllamaService implements LLMService {
   }
 
   async *generate(req: GenerationRequest): AsyncGenerator<string> {
-    // Combine system prompt and user prompt for llama.cpp completion endpoint
-    // For reasoning models, instruct to think silently
-    const prompt = `${req.systemPrompt}\n\n${req.userPrompt}\n\n(Respond directly without showing your thinking process.)`
+    // Use llama.cpp's OpenAI-compatible chat endpoint so the model's chat
+    // template (enabled via --jinja) is applied. Instruct/reasoning models
+    // need this; the raw /completion endpoint makes them echo or continue text.
+    const messages = [
+      { role: 'system', content: req.systemPrompt },
+      { role: 'user', content: req.userPrompt },
+    ]
+
+    // Clamp requested output to the configured generation headroom so a single
+    // pass can never blow past the model's context window.
+    const maxOut = Math.min(req.maxTokens ?? this.maxPredictTokens, this.maxPredictTokens)
 
     try {
-      const response = await fetch(`${this.baseUrl}/completion`, {
+      const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: prompt,
-          n_predict: req.maxTokens || this.maxPredictTokens,
+          messages,
+          max_tokens: maxOut,
           temperature: req.temperature ?? 0.7,
           stream: true,
         }),
@@ -70,70 +72,45 @@ export class OllamaService implements LLMService {
         throw new Error(`llama.cpp error: ${response.status} ${response.statusText} - ${errorText}`)
       }
 
-      const reader = response.body?.getReader()
-      if (!reader) throw new Error('No response body')
+      if (!response.body) throw new Error('No response body')
 
-      // Read the stream line by line (Server-Sent Events style)
+      // node-fetch v2 returns a Node Readable stream (async-iterable).
+      // Read it line by line and parse OpenAI-style SSE chunks.
       const decoder = new TextDecoder('utf-8')
       let buffer = ''
 
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
+      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true })
         const lines = buffer.split('\n')
         // Keep the last incomplete line in buffer
         buffer = lines.pop() || ''
 
         for (const line of lines) {
           const trimmed = line.trim()
-          if (!trimmed) continue
-          
-          if (trimmed.startsWith('data: ')) {
-            const data = trimmed.slice(6).trim()
-            if (data === '[DONE]' || data === '') {
-              continue
-            }
-            try {
-              const parsed = JSON.parse(data)
-              // llama.cpp returns { content: string } or { stop: boolean, content: string }
-              if (parsed.content) {
-                yield parsed.content
-              }
-            } catch (e) {
-              // If JSON parsing fails, skip this line
-              console.debug('Failed to parse SSE data:', trimmed.substring(0, 100))
-            }
-          }
-        }
-      }
+          if (!trimmed.startsWith('data: ')) continue
 
-      // Process any remaining buffer
-      if (buffer.trim()) {
-        if (buffer.trim().startsWith('data: ')) {
-          const data = buffer.trim().slice(6).trim()
-          if (data !== '[DONE]' && data !== '') {
-            try {
-              const parsed = JSON.parse(data)
-              if (parsed.content) {
-                yield parsed.content
-              }
-            } catch (e) {
-              console.debug('Failed to parse final buffer:', buffer.substring(0, 100))
-            }
+          const data = trimmed.slice(6).trim()
+          if (data === '[DONE]' || data === '') continue
+          try {
+            const parsed = JSON.parse(data)
+            // OpenAI-style chunks: { choices: [{ delta: { content } }] }
+            const content = parsed.choices?.[0]?.delta?.content
+            if (content) yield content
+          } catch (e) {
+            // If JSON parsing fails, skip this line
+            console.debug('Failed to parse SSE data:', trimmed.substring(0, 100))
           }
         }
       }
     } catch (error) {
       // Fallback to non-streaming mode
       console.log('Streaming failed, falling back to non-streaming:', error)
-      const nonStreamResponse = await fetch(`${this.baseUrl}/completion`, {
+      const nonStreamResponse = await fetch(`${this.baseUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: prompt,
-          n_predict: req.maxTokens || 512,
+          messages,
+          max_tokens: Math.min(req.maxTokens ?? 512, this.maxPredictTokens),
           temperature: req.temperature ?? 0.7,
           stream: false,
         }),
@@ -143,10 +120,9 @@ export class OllamaService implements LLMService {
         throw new Error(`llama.cpp error: ${nonStreamResponse.status} ${nonStreamResponse.statusText}`)
       }
 
-      const data = await nonStreamResponse.json()
-      if (data.content) {
-        yield data.content
-      }
+      const data = await nonStreamResponse.json() as any
+      const content = data.choices?.[0]?.message?.content
+      if (content) yield content
     }
   }
 
@@ -265,14 +241,12 @@ Context: ${JSON.stringify(context, null, 2)}`
   }
 
   async listModels(): Promise<string[]> {
-    // For llama.cpp server, we can list the model we loaded
-    // The /api/tags endpoint is not available, so we return the model from the filename or a fixed list
-    // We'll try to fetch from /api/tags if it exists (some llama.cpp servers have it), otherwise fallback
+    // llama.cpp exposes an OpenAI-compatible /v1/models endpoint listing the loaded model.
     try {
-      const response = await fetch(`${this.baseUrl}/api/tags`)
+      const response = await fetch(`${this.baseUrl}/v1/models`)
       if (response.ok) {
-        const data = await response.json() as { models: Array<{ name: string }> }
-        return data.models.map((m) => m.name)
+        const data = await response.json() as { data?: Array<{ id: string }> }
+        if (data.data?.length) return data.data.map((m) => m.id)
       }
     } catch (e) {
       // Ignore and fallback
@@ -281,3 +255,6 @@ Context: ${JSON.stringify(context, null, 2)}`
     return [process.env.GENERATION_MODEL || 'llama-model']
   }
 }
+
+// Shared singleton — avoids spinning up a new client per route module.
+export const llmService = new OllamaService()
