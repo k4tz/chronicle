@@ -1,6 +1,6 @@
 // client/src/components/GenerationPanel.tsx
 import { useState } from 'react'
-import { generationApi, StyleProfileRecord } from '../api/api'
+import { generationApi, contextApi, AssembledContext, StyleProfileRecord } from '../api/api'
 
 // Reads an SSE byte stream, buffering across network chunks so a `data:` line
 // split between reads is never parsed half-formed, and invokes `onEvent` per event.
@@ -51,18 +51,50 @@ export default function GenerationPanel({ projectId, chapterId, onGenerate, styl
     focus: 'Balanced',
   })
   const [issues, setIssues] = useState<Array<{ type: string; severity: string; issue: string; suggestion?: string }>>([])
+  // Context preview — lets the author see/steer what the model will actually be given.
+  const [contextPreview, setContextPreview] = useState<AssembledContext | null>(null)
+  const [showContext, setShowContext] = useState(false)
+  const [loadingContext, setLoadingContext] = useState(false)
+
+  const handlePreviewContext = async () => {
+    setLoadingContext(true)
+    try {
+      const ctx = await contextApi.getContext(projectId, {
+        chapterId,
+        q: currentContent.slice(0, 4000) || undefined,
+      })
+      setContextPreview(ctx)
+      setShowContext(true)
+    } catch (error) {
+      setProgress('Failed to load context preview')
+    } finally {
+      setLoadingContext(false)
+    }
+  }
 
   const handleGenerateOutline = async () => {
     setGenerating(true)
     setProgress('Generating outline...')
     try {
-      const result = await generationApi.generateOutline(projectId, chapterId, {
+      // Stream the outline (D2) so it isn't a multi-minute spinner.
+      const stream = await generationApi.streamOutline(projectId, chapterId, {
         ...options,
         styleProfileId: selectedProfile || undefined,
       })
-      onGenerate(result.outline)
+      let outline = ''
+      await consumeSSE(stream, (data) => {
+        if (data.type === 'chunk') {
+          outline += data.content
+          onGenerate(outline)
+        } else if (data.type === 'complete') {
+          if (data.outline) outline = data.outline
+          setProgress('Outline complete!')
+        } else if (data.type === 'error') {
+          setProgress('Generation failed')
+        }
+      })
+      onGenerate(outline)
       setStep('draft')
-      setProgress('')
     } catch (error) {
       setProgress('Failed to generate outline')
     } finally {
@@ -99,7 +131,7 @@ export default function GenerationPanel({ projectId, chapterId, onGenerate, styl
 
   const handleStylePass = async () => {
     if (!selectedProfile) {
-      alert('Please select a style profile')
+      setProgress('Please select a style profile first')
       return
     }
 
@@ -143,7 +175,43 @@ export default function GenerationPanel({ projectId, chapterId, onGenerate, styl
 
   return (
     <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
-      <h3 className="text-lg font-semibold mb-4 text-gray-900 dark:text-gray-100">AI Generation</h3>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">AI Generation</h3>
+        <button
+          onClick={handlePreviewContext}
+          disabled={loadingContext}
+          className="text-sm px-3 py-1.5 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50"
+          title="See exactly what the model will be given as context"
+        >
+          {loadingContext ? 'Loading…' : '🔍 Preview context'}
+        </button>
+      </div>
+
+      {/* Context preview — what the LLM will actually see (tiered + token budget) */}
+      {showContext && contextPreview && (
+        <div className="mb-4 border dark:border-gray-700 rounded-lg overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2 bg-gray-50 dark:bg-gray-700/50">
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-200">
+              Model context · ~{contextPreview.totalTokens.toLocaleString()} tokens
+            </span>
+            <button onClick={() => setShowContext(false)} className="text-xs text-gray-500 hover:underline">Hide</button>
+          </div>
+          <div className="max-h-72 overflow-y-auto p-4 space-y-3 text-xs">
+            {([
+              ['Tier 1 — Core', contextPreview.tier1],
+              ['Tier 2 — Chapter-relevant (retrieved)', contextPreview.tier2],
+              ['Tier 3 — Recent narrative', contextPreview.tier3],
+            ] as const).map(([label, body]) => (
+              <div key={label}>
+                <div className="font-semibold text-gray-600 dark:text-gray-300 mb-1">{label}</div>
+                <pre className="whitespace-pre-wrap font-mono text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-900/40 p-2 rounded">
+                  {body?.trim() ? body : '(empty)'}
+                </pre>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Progress indicator */}
       <div className="flex items-center gap-2 mb-4">

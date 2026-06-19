@@ -15,6 +15,7 @@ router.get('/projects/:projectId/context', async (req, res) => {
       locIds,
       threadIds,
       recentChapters,
+      q,
     } = req.query
 
     const context = await contextAssemblyEngine.assembleContext(projectId, {
@@ -23,6 +24,7 @@ router.get('/projects/:projectId/context', async (req, res) => {
       relevantCharacterIds: charIds ? (charIds as string).split(',') : [],
       relevantLocationIds: locIds ? (locIds as string).split(',') : [],
       relevantThreadIds: threadIds ? (threadIds as string).split(',') : [],
+      queryText: typeof q === 'string' ? q : undefined,
       includeRecentChapters: recentChapters ? parseInt(recentChapters as string) : 3,
     })
 

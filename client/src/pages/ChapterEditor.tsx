@@ -1,12 +1,13 @@
 // client/src/pages/ChapterEditor.tsx
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
-  chaptersApi, charactersApi, locationsApi, styleProfilesApi,
+  chaptersApi, charactersApi, locationsApi, styleProfilesApi, generationApi,
   Chapter, ChapterVersion, Character, Location, StyleProfileRecord,
   CharacterState, LocationState, OpenThread
 } from '../api/api'
 import GenerationPanel from '../components/GenerationPanel'
+import NovelEditor, { EntityRef } from '../components/NovelEditor'
 
 export default function ChapterEditorPage() {
   const { projectId, chapterId } = useParams<{ projectId: string; chapterId: string }>()
@@ -21,9 +22,42 @@ export default function ChapterEditorPage() {
 
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
+  // Autosave: debounced background save so navigating away never loses work.
+  const [autoStatus, setAutoStatus] = useState<'idle' | 'unsaved' | 'saving' | 'saved' | 'error'>('idle')
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
+  const dirtyRef = useRef(false)               // true only after a real user edit
+  const savedContentRef = useRef('')           // last content persisted to the server
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showSnapshot, setShowSnapshot] = useState(false)
   const [showVersions, setShowVersions] = useState(false)
   const [showGenerate, setShowGenerate] = useState(false)
+  // Lightweight, non-blocking toast (replaces alert()).
+  const [toast, setToast] = useState('')
+  const showToast = (msg: string) => {
+    setToast(msg)
+    setTimeout(() => setToast(''), 2500)
+  }
+  // C1: distraction-free focus mode + in-editor find/replace.
+  const [focusMode, setFocusMode] = useState(false)
+  const [showFind, setShowFind] = useState(false)
+  const [findText, setFindText] = useState('')
+  const [replaceText, setReplaceText] = useState('')
+
+  const findCount = findText ? content.split(findText).length - 1 : 0
+  const replaceAll = () => {
+    if (!findText) return
+    dirtyRef.current = true
+    setContent(prev => prev.split(findText).join(replaceText))
+    showToast(`Replaced ${findCount} occurrence${findCount === 1 ? '' : 's'}`)
+  }
+
+  // Known entities for inline hovercards in the editor.
+  const entityRefs = useMemo<EntityRef[]>(() => [
+    ...characters.map(c => ({ name: c.name, type: 'Character', detail: (c.motivation || c.personality || c.background || '').slice(0, 140) || undefined })),
+    ...locations.map(l => ({ name: l.name, type: 'Location', detail: (l.description || l.atmosphere || '').slice(0, 140) || undefined })),
+  ], [characters, locations])
+
+  const onEditorChange = (v: string) => { dirtyRef.current = true; setContent(v) }
 
   // Snapshot form state
   const [charStates, setCharStates] = useState<Record<string, CharacterState>>({})
@@ -31,6 +65,14 @@ export default function ChapterEditorPage() {
   const [threadStates, setThreadStates] = useState<Record<string, OpenThread>>({})
   const [newCanonFacts, setNewCanonFacts] = useState('')
   const [worldChanges, setWorldChanges] = useState('')
+
+  // B1: AI auto-fill of the snapshot with confidence. Manual editing stays the
+  // source of truth — the AI just pre-fills and flags the uncertain items.
+  const [autoFilling, setAutoFilling] = useState(false)
+  const [overallConfidence, setOverallConfidence] = useState<number | null>(null)
+  const [charConfidence, setCharConfidence] = useState<Record<string, number>>({})
+  const [locConfidence, setLocConfidence] = useState<Record<string, number>>({})
+  const LOW_CONFIDENCE = 70
 
   useEffect(() => { loadAllData() }, [projectId, chapterId])
 
@@ -48,11 +90,14 @@ export default function ChapterEditorPage() {
       setStyleProfiles(profiles)
 
       // Get latest version content
-      if (chapterData.versions.length > 0) {
-        setContent(chapterData.versions[chapterData.versions.length - 1].content)
-      } else {
-        setContent('')
-      }
+      const loaded = chapterData.versions.length > 0
+        ? chapterData.versions[chapterData.versions.length - 1].content
+        : ''
+      setContent(loaded)
+      // Loaded content is already persisted — start clean so we don't autosave it.
+      savedContentRef.current = loaded
+      dirtyRef.current = false
+      setAutoStatus('idle')
 
       setCharacters(chars)
       setLocations(locs)
@@ -105,16 +150,48 @@ export default function ChapterEditorPage() {
     }).catch(console.error).finally(() => setLoading(false))
   }
 
+  // Debounced autosave — fires ~2.5s after the user stops typing, only when the
+  // content actually changed since the last persisted version.
+  useEffect(() => {
+    if (!dirtyRef.current) return
+    if (content === savedContentRef.current) return
+    setAutoStatus('unsaved')
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => { void autoSave() }, 2500)
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content])
+
+  const autoSave = async () => {
+    if (!projectId || !chapterId) return
+    if (content === savedContentRef.current) return
+    setAutoStatus('saving')
+    try {
+      await chaptersApi.saveVersion(projectId, chapterId, content, 'MANUAL')
+      savedContentRef.current = content
+      dirtyRef.current = false
+      setLastSavedAt(new Date())
+      setAutoStatus('saved')
+    } catch (error) {
+      console.error('Autosave failed:', error)
+      setAutoStatus('error')
+    }
+  }
+
   const handleSave = async (passType: 'DRAFT' | 'MANUAL' | 'FINAL') => {
     if (!projectId || !chapterId) return
+    if (debounceRef.current) clearTimeout(debounceRef.current)
     setSaving(true)
     try {
       await chaptersApi.saveVersion(projectId, chapterId, content, passType)
-      alert('Chapter saved!')
+      savedContentRef.current = content
+      dirtyRef.current = false
+      setLastSavedAt(new Date())
+      setAutoStatus('saved')
       loadAllData()
     } catch (error) {
       console.error('Failed to save:', error)
-      alert('Failed to save chapter')
+      setAutoStatus('error')
     } finally {
       setSaving(false)
     }
@@ -125,6 +202,9 @@ export default function ChapterEditorPage() {
   // without clobbering the freshly generated content.
   const handleGenerated = async (newContent: string) => {
     setContent(newContent)
+    // Server already saved this as a version; don't let autosave duplicate it.
+    savedContentRef.current = newContent
+    dirtyRef.current = false
     if (!projectId || !chapterId) return
     try {
       const data = await chaptersApi.get(projectId, chapterId)
@@ -147,11 +227,88 @@ export default function ChapterEditorPage() {
       }
       await chaptersApi.saveSnapshot(projectId, chapterId, snapshotData)
       setShowSnapshot(false)
-      alert('State snapshot saved!')
+      showToast('State snapshot saved')
       loadAllData()
     } catch (error) {
       console.error('Failed to save snapshot:', error)
-      alert('Failed to save snapshot')
+      showToast('Failed to save snapshot')
+    }
+  }
+
+  // B1: ask the AI to infer the snapshot from the chapter text, pre-fill the
+  // form, and flag low-confidence items. The author still reviews/edits/saves.
+  const handleAutoFill = async () => {
+    if (!projectId || !chapterId) return
+    setAutoFilling(true)
+    try {
+      const { analysis } = await generationApi.analyzeChapter(projectId, chapterId, content || undefined)
+
+      const charByName = new Map(characters.map(c => [c.name.toLowerCase(), c]))
+      const newCharConf: Record<string, number> = {}
+      setCharStates(prev => {
+        const next = { ...prev }
+        for (const cs of analysis.characterStates) {
+          const ch = charByName.get(String(cs.characterName || '').toLowerCase())
+          if (!ch) continue
+          next[ch.id] = {
+            charId: ch.id,
+            location: cs.location || '',
+            condition: cs.condition || 'normal',
+            emotionalState: cs.emotionalState || '',
+            activeGoals: cs.activeGoals || [],
+            newKnowledge: cs.newKnowledge || [],
+          }
+          if (typeof cs.confidence === 'number') newCharConf[ch.id] = cs.confidence
+        }
+        return next
+      })
+      setCharConfidence(newCharConf)
+
+      const locByName = new Map(locations.map(l => [l.name.toLowerCase(), l]))
+      const newLocConf: Record<string, number> = {}
+      setLocStates(prev => {
+        const next = { ...prev }
+        for (const ls of analysis.locationStates) {
+          const loc = locByName.get(String(ls.locationName || '').toLowerCase())
+          if (!loc) continue
+          next[loc.id] = {
+            locationId: loc.id,
+            currentOccupants: ls.currentOccupants || [],
+            condition: ls.condition || '',
+            activeEvents: ls.activeEvents || [],
+          }
+          if (typeof ls.confidence === 'number') newLocConf[loc.id] = ls.confidence
+        }
+        return next
+      })
+      setLocConfidence(newLocConf)
+
+      // Inferred threads have no id yet — key them by a synthetic id so they show.
+      setThreadStates(prev => {
+        const next = { ...prev }
+        for (const t of analysis.openThreads) {
+          const id = `ai:${t.name}`
+          next[id] = { threadId: id, name: t.name, urgency: (t.urgency as 1 | 2 | 3) || 2, lastDevelopment: t.lastDevelopment || '' }
+        }
+        return next
+      })
+
+      const mergeLines = (existing: string, lines: string[]) => {
+        const have = new Set(existing.split('\n').map(s => s.trim()).filter(Boolean))
+        const merged = [...have]
+        for (const l of lines) { if (l.trim() && !have.has(l.trim())) merged.push(l.trim()) }
+        return merged.join('\n')
+      }
+      if (analysis.newCanonFacts.length) setNewCanonFacts(prev => mergeLines(prev, analysis.newCanonFacts))
+      if (analysis.worldChanges.length) setWorldChanges(prev => mergeLines(prev, analysis.worldChanges))
+
+      setOverallConfidence(analysis.overallConfidence)
+      showToast(`AI pre-filled the snapshot (~${analysis.overallConfidence}% confident). Review highlighted items, then Save.`)
+    } catch (error) {
+      console.error('Auto-fill failed:', error)
+      showToast('AI auto-fill failed — fill the snapshot manually')
+    } finally {
+      setAutoFilling(false)
     }
   }
 
@@ -178,6 +335,10 @@ export default function ChapterEditorPage() {
 
   const loadVersion = (version: ChapterVersion) => {
     setContent(version.content)
+    // This version is already persisted; treat it as clean until the user edits.
+    savedContentRef.current = version.content
+    dirtyRef.current = false
+    setAutoStatus('idle')
     setShowVersions(false)
   }
 
@@ -192,10 +353,29 @@ export default function ChapterEditorPage() {
           <p className="text-gray-500 text-sm mt-1">
             Status: <span className="capitalize">{chapter.status}</span> • {chapter.wordCount.toLocaleString()} words
           </p>
+          <p className="text-xs mt-1 h-4" aria-live="polite">
+            {autoStatus === 'saving' && <span className="text-gray-400">Saving…</span>}
+            {autoStatus === 'saved' && <span className="text-green-600">Saved{lastSavedAt ? ` · ${lastSavedAt.toLocaleTimeString()}` : ''}</span>}
+            {autoStatus === 'unsaved' && <span className="text-amber-600">Unsaved changes…</span>}
+            {autoStatus === 'error' && <span className="text-red-600">Autosave failed — click Save</span>}
+          </p>
         </div>
         <div className="flex gap-2">
           <button onClick={() => navigate(`/projects/${projectId}/chapters`)} className="px-4 py-2 text-gray-600 hover:text-gray-800">
             ← Back to Chapters
+          </button>
+          <button
+            onClick={() => setShowFind(v => !v)}
+            className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
+          >
+            🔍 Find
+          </button>
+          <button
+            onClick={() => setFocusMode(true)}
+            className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
+            title="Distraction-free writing"
+          >
+            🎯 Focus
           </button>
           <button
             onClick={() => setShowGenerate(!showGenerate)}
@@ -267,11 +447,28 @@ export default function ChapterEditorPage() {
       {/* State Snapshot Drawer */}
       {showSnapshot && (
         <div className="mb-6 bg-white dark:bg-gray-800 p-6 rounded-lg shadow space-y-6">
-          <div className="flex items-center justify-between">
-            <h3 className="font-semibold text-lg">State Snapshot - Chapter {chapter.number}</h3>
-            <button onClick={handleSaveSnapshot} className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700">
-              Save Snapshot
-            </button>
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h3 className="font-semibold text-lg">State Snapshot - Chapter {chapter.number}</h3>
+              {overallConfidence != null && (
+                <p className="text-xs text-gray-500 mt-0.5">
+                  AI confidence ~{overallConfidence}% · amber = please confirm
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={handleAutoFill}
+                disabled={autoFilling}
+                className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+                title="Let the AI infer this snapshot from the chapter; you confirm the uncertain bits"
+              >
+                {autoFilling ? 'Analyzing…' : '✨ Auto-fill from chapter (AI)'}
+              </button>
+              <button onClick={handleSaveSnapshot} className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700">
+                Save Snapshot
+              </button>
+            </div>
           </div>
 
           {/* Character States */}
@@ -279,8 +476,13 @@ export default function ChapterEditorPage() {
             <h4 className="font-medium mb-3">Character States</h4>
             <div className="grid gap-4 md:grid-cols-2">
               {characters.map(char => (
-                <div key={char.id} className="border dark:border-gray-700 rounded p-4">
-                  <p className="font-medium">{char.name}</p>
+                <div key={char.id} className={`border rounded p-4 ${charConfidence[char.id] != null && charConfidence[char.id] < LOW_CONFIDENCE ? 'border-amber-400 ring-1 ring-amber-400' : 'dark:border-gray-700'}`}>
+                  <p className="font-medium flex items-center gap-2">
+                    {char.name}
+                    {charConfidence[char.id] != null && charConfidence[char.id] < LOW_CONFIDENCE && (
+                      <span className="text-[10px] font-normal px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">confirm ({charConfidence[char.id]}%)</span>
+                    )}
+                  </p>
                   <div className="mt-2 space-y-2">
                     <div>
                       <label className="text-xs text-gray-500">Location</label>
@@ -327,8 +529,13 @@ export default function ChapterEditorPage() {
             <h4 className="font-medium mb-3">Location States</h4>
             <div className="grid gap-4 md:grid-cols-2">
               {locations.map(loc => (
-                <div key={loc.id} className="border dark:border-gray-700 rounded p-4">
-                  <p className="font-medium">{loc.name}</p>
+                <div key={loc.id} className={`border rounded p-4 ${locConfidence[loc.id] != null && locConfidence[loc.id] < LOW_CONFIDENCE ? 'border-amber-400 ring-1 ring-amber-400' : 'dark:border-gray-700'}`}>
+                  <p className="font-medium flex items-center gap-2">
+                    {loc.name}
+                    {locConfidence[loc.id] != null && locConfidence[loc.id] < LOW_CONFIDENCE && (
+                      <span className="text-[10px] font-normal px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">confirm ({locConfidence[loc.id]}%)</span>
+                    )}
+                  </p>
                   <div className="mt-2 space-y-2">
                     <div>
                       <label className="text-xs text-gray-500">Condition</label>
@@ -418,20 +625,78 @@ export default function ChapterEditorPage() {
         </div>
       )}
 
+      {/* Find / Replace bar */}
+      {showFind && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 bg-white dark:bg-gray-800 p-3 rounded-lg shadow">
+          <input
+            value={findText}
+            onChange={(e) => setFindText(e.target.value)}
+            placeholder="Find"
+            className="px-3 py-1.5 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
+          />
+          <input
+            value={replaceText}
+            onChange={(e) => setReplaceText(e.target.value)}
+            placeholder="Replace with"
+            className="px-3 py-1.5 border rounded text-sm bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-gray-100"
+          />
+          <span className="text-xs text-gray-500">{findText ? `${findCount} match${findCount === 1 ? '' : 'es'}` : ''}</span>
+          <button onClick={replaceAll} disabled={!findText || findCount === 0} className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">
+            Replace all
+          </button>
+          <button onClick={() => setShowFind(false)} className="px-2 py-1.5 text-sm text-gray-500 hover:text-gray-700">✕</button>
+        </div>
+      )}
+
       {/* Chapter Editor */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-        <textarea
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow px-6 py-2">
+        <NovelEditor
           value={content}
-          onChange={(e) => setContent(e.target.value)}
+          onChange={onEditorChange}
+          entities={entityRefs}
           placeholder="Start writing your chapter..."
-          className="w-full h-[600px] px-6 py-4 border-0 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-lg resize-none font-serif text-lg leading-relaxed bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+          height="600px"
         />
       </div>
+
+      {/* Focus mode — distraction-free full-screen editor (autosave still runs) */}
+      {focusMode && (
+        <div className="fixed inset-0 z-50 bg-white dark:bg-gray-900 flex flex-col">
+          <div className="flex items-center justify-between px-6 py-3 border-b border-gray-200 dark:border-gray-700">
+            <div className="text-sm text-gray-500">
+              {chapter.title || `Chapter ${chapter.number}`} · {content.split(/\s+/).filter(w => w.length > 0).length.toLocaleString()} words
+              {autoStatus === 'saving' && ' · Saving…'}
+              {autoStatus === 'saved' && ' · Saved'}
+              {autoStatus === 'unsaved' && ' · Unsaved…'}
+            </div>
+            <button onClick={() => setFocusMode(false)} className="px-4 py-1.5 text-sm bg-gray-700 text-white rounded hover:bg-gray-600">
+              Exit focus (Esc)
+            </button>
+          </div>
+          <div className="flex-1 overflow-auto w-full max-w-3xl mx-auto px-6 py-8" onKeyDown={(e) => { if (e.key === 'Escape') setFocusMode(false) }}>
+            <NovelEditor
+              autoFocus
+              value={content}
+              onChange={onEditorChange}
+              entities={entityRefs}
+              placeholder="Write…"
+              height="100%"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Word count */}
       <div className="mt-4 text-right text-gray-500 text-sm">
         {content.split(/\s+/).filter(w => w.length > 0).length.toLocaleString()} words
       </div>
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg shadow-lg bg-gray-900 text-white text-sm" role="status" aria-live="polite">
+          {toast}
+        </div>
+      )}
     </div>
   )
 }

@@ -6,6 +6,11 @@
 > Long-form novel writing app powered by local LLMs.
 > Target: 200,000–400,000 word novels. Text stories only. Local-first.
 
+> ⚠️ **A foundation rebuild is planned.** This file inventories what's *implemented*; for the
+> senior-dev/product assessment of *what's weak and what to fix* (retrieval, context compression,
+> structured LLM output, the editor, per-chapter friction) and the prioritized roadmap, see
+> **[REBUILD-PLAN.md](./REBUILD-PLAN.md)** — start there when resuming.
+
 ---
 
 ## Implementation Overview
@@ -190,15 +195,20 @@ Each item below is confirmed absent or partial in the current codebase:
 
 ## Technical Debt / Known Issues
 
-1. **Token counting** — character-based estimate (1 token ≈ 4 chars). Consider `tiktoken` for accuracy.
-2. **KB search** — substring match, not FTS5; fine locally, weak for large projects.
-3. **Single LLM provider** — only Ollama is implemented; OpenAI/Anthropic are documented but not coded.
-4. **Snapshot LLM pre-fill** — implemented via `generate/snapshot`, but the assist is basic and could be smarter.
-5. **No authentication** — all routes are open. Add auth before any non-local deployment.
-6. **No rate limiting** — add before exposing the API.
-7. **SSE error handling** — streaming passes could use better error recovery/resume.
-8. **Large file uploads** — style sample uploads may time out for large files.
-9. **`node-fetch` types** — inline type declaration in `llmService`; consider proper `@types`.
+1. ~~**Token counting** — character-based estimate.~~ **Resolved (foundation rebuild):** real
+   tokenizer via `gpt-tokenizer` in `services/tokenizer.ts`; context budgeting no longer uses chars/4.
+2. ~~**KB search** — substring match, not FTS5.~~ **Resolved:** SQLite FTS5 (`kb_fts`) with ranked
+   `MATCH` and a substring fallback. See REBUILD-PLAN §0.5/§A4.
+3. **Single LLM provider** — only Ollama/llama.cpp is implemented; OpenAI/Anthropic remain documented but not coded.
+4. ~~**Structured LLM output** — regex-scraped with silent-empty fallback.~~ **Resolved:**
+   grammar-constrained JSON via `completeStructured` + `services/schemas.ts` across all structured calls.
+5. **Snapshot LLM pre-fill** — now also mirrored into the relational `character_states`/`location_states`
+   tables and reliable via grammar-constrained output; the auto-vs-confirm UX (B1) is still future work.
+6. **No authentication** — all routes are open. Add auth before any non-local deployment.
+7. **No rate limiting** — add before exposing the API.
+8. **SSE error handling** — streaming passes could use better error recovery/resume.
+9. **Large file uploads** — style sample uploads may time out for large files.
+10. **`node-fetch` types** — inline type declaration in `llmService`; consider proper `@types`.
 
 ---
 

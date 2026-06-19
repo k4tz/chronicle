@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid'
 import { db, eq } from '../db'
 import { styleProfiles } from '../db/schema'
 import { llmService } from '../services/llmService'
+import { STYLE_PROFILE_SCHEMA, STYLE_DRIFT_SCHEMA } from '../services/schemas'
 import fs from 'fs'
 import path from 'path'
 
@@ -206,15 +207,12 @@ Return ONLY valid JSON in this exact format:
 
 Analyze the samples carefully and provide accurate assessments.`
 
-    const response = await llmService.complete({
+    const profile = await llmService.completeStructured({
       systemPrompt,
       userPrompt: `Analyze these writing samples:\n\n${samples.join('\n\n---\n\n')}`,
       maxTokens: 1000,
       temperature: 0.3,
-    })
-
-    const jsonMatch = response.match(/\{[\s\S]*\}/)
-    const profile = jsonMatch ? JSON.parse(jsonMatch[0]) : JSON.parse(response)
+    }, STYLE_PROFILE_SCHEMA, 'style_profile')
 
     res.json({ success: true, profile })
   } catch (error) {
@@ -298,15 +296,17 @@ Return ONLY valid JSON:
   "feedback": "brief explanation of drift areas"
 }`
 
-    const response = await llmService.complete({
-      systemPrompt: systemPrompt,
-      userPrompt: `Style Profile: ${JSON.stringify(savedProfile)}\n\nChapter Text:\n${chapterText.slice(0, 5000)}`,
-      maxTokens: 500,
-      temperature: 0.3,
-    })
-
-    const jsonMatch = response.match(/\{[\s\S]*\}/)
-    const drift = jsonMatch ? JSON.parse(jsonMatch[0]) : { overallScore: 50, feedback: 'Unable to analyze' }
+    let drift: unknown = { overallScore: 50, feedback: 'Unable to analyze' }
+    try {
+      drift = await llmService.completeStructured({
+        systemPrompt: systemPrompt,
+        userPrompt: `Style Profile: ${JSON.stringify(savedProfile)}\n\nChapter Text:\n${chapterText.slice(0, 5000)}`,
+        maxTokens: 500,
+        temperature: 0.3,
+      }, STYLE_DRIFT_SCHEMA, 'style_drift')
+    } catch (err) {
+      console.warn('Style drift parse failed, returning default:', (err as Error).message)
+    }
 
     res.json({ success: true, drift })
   } catch (error) {

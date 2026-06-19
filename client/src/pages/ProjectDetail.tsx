@@ -4,6 +4,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useProject } from '../store/projects'
 import { apiClient, projectsApi } from '../api/client'
+import Onboarding from '../components/Onboarding'
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>()
@@ -99,6 +100,9 @@ export default function ProjectDetail() {
           ← Back to Projects
         </button>
       </div>
+
+      {/* Getting-started funnel (hides itself once the project is set up) */}
+      {id && <Onboarding projectId={id} world={world} />}
 
       {/* Word Count Progress */}
       <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow mb-6">

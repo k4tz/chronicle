@@ -2,6 +2,7 @@
 import { Router } from 'express'
 import { llmService } from '../services/llmService'
 import type { GenerationRequest } from '../types/services'
+import { JsonSchema, WORLD_SCHEMA, CHARACTER_SCHEMA, LOCATION_SCHEMA } from '../services/schemas'
 import { ideasService } from '../services/ideasService'
 import { db, eq } from '../db'
 import { worldFoundations, characters, locations } from '../db/schema'
@@ -19,46 +20,6 @@ router.get('/llm/config', (req, res) => {
     maxPredictTokens: Math.floor(parseInt(process.env.GENERATION_HEADROOM || '4096') * 0.9),
   })
 })
-
-// Helper to extract JSON from LLM response (handles markdown code blocks)
-function extractJsonFromResponse(response: string): any {
-  const trimmed = response.trim()
-  
-  // First try to find JSON inside markdown code blocks
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g
-  let codeBlockMatch
-  while ((codeBlockMatch = codeBlockRegex.exec(trimmed)) !== null) {
-    try {
-      return JSON.parse(codeBlockMatch[1].trim())
-    } catch {}
-  }
-  
-  // Fallback: find the FIRST complete JSON object in response
-  // We need to find balanced braces, not just { ... }
-  let braceCount = 0
-  let startIndex = -1
-  
-  for (let i = 0; i < trimmed.length; i++) {
-    if (trimmed[i] === '{') {
-      if (braceCount === 0) startIndex = i
-      braceCount++
-    } else if (trimmed[i] === '}') {
-      braceCount--
-      if (braceCount === 0 && startIndex !== -1) {
-        // Found a complete JSON object
-        const candidate = trimmed.substring(startIndex, i + 1)
-        try {
-          return JSON.parse(candidate)
-        } catch {
-          // Try to continue looking for more
-          startIndex = -1
-        }
-      }
-    }
-  }
-  
-  throw new Error('No valid JSON found in response')
-}
 
 // Coerce any LLM-returned value (string, array, or object) into a flat string.
 function normalizeString(val: any, defaultVal: string = ''): string {
@@ -86,22 +47,23 @@ function normalizeString(val: any, defaultVal: string = ''): string {
   return String(val).trim()
 }
 
-// Calls the LLM, retrying on empty responses or transient errors (with backoff).
-async function completeWithRetry(req: GenerationRequest, label: string, maxRetries = 3): Promise<string> {
+// Grammar-constrained JSON with retry on transient errors (with backoff).
+// The schema forces valid output, so we mainly retry network/server hiccups.
+async function completeStructuredWithRetry<T>(
+  req: GenerationRequest,
+  schema: JsonSchema,
+  schemaName: string,
+  label: string,
+  maxRetries = 3,
+): Promise<T> {
   let lastError: Error | null = null
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await llmService.complete(req)
-      if (response && response.trim().length > 0) {
-        return response
-      }
-      lastError = new Error('Empty response from LLM')
+      return await llmService.completeStructured<T>(req, schema, schemaName)
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error))
       console.warn(`${label} attempt ${attempt} failed:`, lastError.message)
-      if (attempt === maxRetries) {
-        throw lastError
-      }
+      if (attempt === maxRetries) throw lastError
       // Exponential backoff before the next attempt
       await new Promise(resolve => setTimeout(resolve, 500 * attempt))
     }
@@ -128,21 +90,18 @@ router.post('/projects/:projectId/generate/world', async (req, res) => {
       ? ideasService.formatIdeasForPrompt(allWorldIdeas)
       : ''
 
-    const systemPrompt = `Generate a detailed world for a novel. Return ONLY valid JSON with no other text:
-{"cosmology":"string","history":"string","geography":"string","politicalLandscape":"string","economy":"string","culture":"string","magicOrTechRules":"string"}
+    const systemPrompt = `Generate a detailed world for a novel. Return ONLY valid JSON with no other text. Keys (all strings): cosmology, history, geography, politicalLandscape, economy, culture, magicOrTechRules.
 
 Important: Do not include any thinking, reasoning, or explanation. Only output the JSON object.`
 
     const userPrompt = `Create a world based on: ${seed}${ideasContext ? '\n\n' + ideasContext : ''}`
 
-    const response = await llmService.complete({
+    const worldData = await completeStructuredWithRetry<Record<string, string>>({
       systemPrompt,
       userPrompt,
       maxTokens: 4000,
       temperature: 0.8,
-    })
-
-    const worldData = extractJsonFromResponse(response)
+    }, WORLD_SCHEMA, 'world', 'World generation')
 
     const existing = await db.select().from(worldFoundations).where(eq(worldFoundations.projectId, projectId)).get()
 
@@ -216,14 +175,12 @@ Fantasy novel setting. Make them compelling with depth.`
 
     userPrompt += '\n\nAll values must be strings (no arrays). Use commas for lists.'
 
-    const response = await completeWithRetry({
+    const charData = await completeStructuredWithRetry<Record<string, string>>({
       systemPrompt,
       userPrompt,
       maxTokens: 2500,
       temperature: 0.8,
-    }, 'Character generation')
-
-    const charData = extractJsonFromResponse(response)
+    }, CHARACTER_SCHEMA, 'character', 'Character generation')
 
     // Validate required fields
     if (!charData.name) {
@@ -302,14 +259,12 @@ Fantasy novel setting. Make it vivid and immersive.`
 
     userPrompt += '\n\nAll values must be strings.'
 
-    const response = await completeWithRetry({
+    const locData = await completeStructuredWithRetry<Record<string, string>>({
       systemPrompt,
       userPrompt,
       maxTokens: 2000,
       temperature: 0.8,
-    }, 'Location generation')
-
-    const locData = extractJsonFromResponse(response)
+    }, LOCATION_SCHEMA, 'location', 'Location generation')
 
     // Validate required fields
     if (!locData.name) {

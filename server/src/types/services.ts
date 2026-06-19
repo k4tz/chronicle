@@ -71,11 +71,15 @@ export interface CacheService {
 
 export interface LLMService {
   generate(req: GenerationRequest): AsyncGenerator<string>    // streaming
-  complete(req: GenerationRequest): Promise<string>           // single response
+  complete(req: GenerationRequest): Promise<string>           // single response prose
+  // Grammar-constrained JSON. Schema is passed to the model so output is forced
+  // to match; parsed robustly. Throws if nothing parseable comes back.
+  completeStructured<T = unknown>(req: GenerationRequest, schema: Record<string, any>, schemaName?: string): Promise<T>
   extractEntities(text: string, projectId: string): Promise<ExtractedEntities>
   checkConsistency(text: string, context: KBContext): Promise<ConsistencyFlag[]>
   extractStyleProfile(samples: string[]): Promise<StyleProfile>
   summarize(text: string, maxTokens: number): Promise<string>
+  embed(texts: string[]): Promise<number[][]>                 // vector embeddings (optional backend)
   listModels(): Promise<string[]>
 }
 

@@ -1,29 +1,11 @@
 // server/src/routes/validate.ts
 import { Router } from 'express'
 import { llmService } from '../services/llmService'
+import { WORLD_ISSUES_SCHEMA } from '../services/schemas'
 import { db, eq } from '../db'
 import { worldFoundations, characters, locations, loreEntries } from '../db/schema'
 
 const router = Router()
-
-// Helper to extract JSON array from LLM response
-function extractJsonArrayFromResponse(response: string): any[] {
-  // First try to find JSON inside markdown code blocks
-  const codeBlockMatch = response.match(/```(?:json)?\s*([\s\S]*?)```/)
-  if (codeBlockMatch) {
-    try {
-      return JSON.parse(codeBlockMatch[1].trim())
-    } catch {}
-  }
-  
-  // Fallback: find JSON array in response
-  const jsonMatch = response.match(/\[[\s\S]*\]/)
-  if (jsonMatch) {
-    return JSON.parse(jsonMatch[0])
-  }
-  
-  return []
-}
 
 // POST /api/projects/:projectId/validate/consistency - Check for contradictions
 router.post('/projects/:projectId/validate/consistency', async (req, res) => {
@@ -58,13 +40,16 @@ Return ONLY a JSON array in this format: [{"type":"character|location|world|lore
 If no issues found, return an empty array [].
 Do not include any thinking, reasoning, or explanation. Only output the JSON array.`
 
-    const response = await llmService.complete({
-      systemPrompt,
-      userPrompt: `Check for contradictions in: ${JSON.stringify(context, null, 2)}`,
-      maxTokens: 2000,
-    })
-
-    const issues = extractJsonArrayFromResponse(response)
+    let issues: unknown[] = []
+    try {
+      issues = await llmService.completeStructured<unknown[]>({
+        systemPrompt,
+        userPrompt: `Check for contradictions in: ${JSON.stringify(context, null, 2)}`,
+        maxTokens: 2000,
+      }, WORLD_ISSUES_SCHEMA, 'world_issues')
+    } catch (err) {
+      console.warn('Consistency validation parse failed, returning no issues:', (err as Error).message)
+    }
 
     res.json({ success: true, issues })
   } catch (error) {

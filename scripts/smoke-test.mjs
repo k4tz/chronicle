@@ -63,7 +63,7 @@ async function api(method, path, body, { raw = false, timeout = 30000 } = {}) {
 }
 
 // Shared state across tests
-let projectId, chapterId, charId, char2Id, locId, ideaId, styleId
+let projectId, chapterId, charId, char2Id, locId, ideaId, styleId, majorArcId, subArcId
 
 async function main() {
   log(`\nChronicle E2E smoke test → ${BASE}`)
@@ -182,6 +182,62 @@ async function main() {
     const r = await api('POST', `/projects/${projectId}/foreshadowing`, { setup: 'A locked door', plannedPayoff: 'It hides the heir' })
     assert(r.status === 200 && r.json.id, 'create failed')
   })
+
+  log('\nArc Planner')
+  await test('Major arc: create / list (hydrated with sub-arcs)', async () => {
+    const r = await api('POST', `/projects/${projectId}/major-arcs`, {
+      title: 'Vol 1: The Awakening', chapterStart: 1, chapterEnd: 5,
+      centralConflict: 'A hidden heir threatens the throne', toneKeywords: ['tension', 'mystery'],
+      characters: [{ characterId: charId, name: 'Aria', role: 'protagonist' }],
+    })
+    assert(r.status === 200 && r.json.id, 'create failed')
+    majorArcId = r.json.id
+    assert(Array.isArray(r.json.toneKeywords) && r.json.toneKeywords[0] === 'tension', 'toneKeywords not parsed')
+    const list = await api('GET', `/projects/${projectId}/major-arcs`)
+    assert(list.json.length === 1 && Array.isArray(list.json[0].subArcs), 'list not hydrated with subArcs')
+  })
+  await test('Major arc: missing title rejected (400)', async () => {
+    const r = await api('POST', `/projects/${projectId}/major-arcs`, { chapterStart: 1 })
+    assert(r.status === 400, `expected 400, got ${r.status}`)
+  })
+  await test('Sub-arc: create with plot points covering chapter 1', async () => {
+    const r = await api('POST', `/projects/${projectId}/major-arcs/${majorArcId}/sub-arcs`, {
+      title: 'The Discovery', chapterStart: 1, chapterEnd: 3, plotProgression: 'setup',
+      emotionalArc: 'curiosity → dread',
+      charactersInvolved: [{ characterId: charId, name: 'Aria', presenceLevel: 'central', arcGoal: 'find the truth', arcFear: 'being too late' }],
+      plotPoints: [{ label: 'Aria finds the locked door', type: 'event', chaptersAffected: [1] }],
+      unresolvedThreads: ['Who locked the door?'],
+    })
+    assert(r.status === 200 && r.json.id, 'create failed')
+    subArcId = r.json.id
+    assert(r.json.plotPoints.length === 1 && r.json.plotPoints[0].id && r.json.plotPoints[0].status === 'pending', 'plot points not normalized')
+  })
+  await test('Sub-arc: update persists', async () => {
+    const r = await api('PATCH', `/projects/${projectId}/major-arcs/${majorArcId}/sub-arcs/${subArcId}`, { pacingNotes: 'slow build' })
+    assert(r.status === 200 && r.json.pacingNotes === 'slow build', 'update not persisted')
+  })
+  await test('Generation context: derived from sub-arc + parent', async () => {
+    const r = await api('GET', `/projects/${projectId}/major-arcs/${majorArcId}/generation-context/${subArcId}`)
+    assert(r.status === 200, `status ${r.status}`)
+    assert(r.json.context && r.json.context.pendingPlotPoints.length === 1, 'pending plot points missing')
+    assert(r.json.context.parentArcSummary.title === 'Vol 1: The Awakening', 'parent summary missing')
+    assert(typeof r.json.prompt === 'string' && r.json.prompt.includes('STORY ARC GUIDANCE'), 'prompt block missing')
+  })
+  await test('Arc context for chapter 1: hasArcData=true', async () => {
+    const r = await api('GET', `/projects/${projectId}/arc-context/1`)
+    assert(r.status === 200 && r.json.hasArcData === true, 'arc data not found for chapter 1')
+    assert(r.json.prompt.includes('The Discovery'), 'sub-arc title missing from prompt')
+  })
+  await test('Arc context for out-of-range chapter: hasArcData=false', async () => {
+    const r = await api('GET', `/projects/${projectId}/arc-context/99`)
+    assert(r.status === 200 && r.json.hasArcData === false, 'expected graceful fallback for unplanned chapter')
+  })
+  await test('Migration status reports legacy data', async () => {
+    const r = await api('GET', `/projects/${projectId}/arc-planner/migration-status`)
+    assert(r.status === 200, `status ${r.status}`)
+    assert(r.json.legacy && r.json.legacy.threads >= 1 && r.json.legacy.foreshadowing >= 1, 'legacy counts wrong')
+    assert(r.json.majorArcs >= 1, 'major arc count wrong')
+  })
   await test('Ideas: create / toggle-used / clamp deviation', async () => {
     const r = await api('POST', `/projects/${projectId}/ideas`, { title: 'Twist ending', description: 'the mentor is the villain', category: 'plot' })
     assert(r.status === 200 && r.json.id, 'create failed')
@@ -243,6 +299,39 @@ async function main() {
     assert(r.status === 200, `status ${r.status}`)
     assert(typeof r.json.tier1 === 'string', 'tier1 missing')
     assert('tier2' in r.json && 'tier3' in r.json, 'tier2/tier3 missing')
+  })
+  await test('GET /context injects Arc Planner guidance into Tier 1', async () => {
+    // The major/sub-arc created above cover chapter 1, so the pipeline must
+    // surface arc guidance (never-trimmed Tier 1). Validates the integration.
+    const r = await api('GET', `/projects/${projectId}/context?chapterId=${chapterId}&chapterNumber=1`)
+    assert(r.status === 200, `status ${r.status}`)
+    assert(r.json.tier1.includes('STORY ARC GUIDANCE'), 'arc guidance not injected into tier1')
+    assert(r.json.tier1.includes('The Discovery'), 'sub-arc not present in tier1')
+  })
+
+  await test('GET /generation-logs returns usage aggregates', async () => {
+    const r = await api('GET', `/projects/${projectId}/generation-logs`)
+    assert(r.status === 200, `status ${r.status}`)
+    assert(r.json.totals && typeof r.json.totals.calls === 'number', 'no totals.calls')
+    assert(typeof r.json.byPass === 'object' && Array.isArray(r.json.recent), 'byPass/recent shape wrong')
+  })
+  await test('GET /quality returns a story-health report', async () => {
+    const r = await api('GET', `/projects/${projectId}/quality`)
+    assert(r.status === 200, `status ${r.status}`)
+    assert(r.json.summary && typeof r.json.summary.staleThreads === 'number', 'no summary.staleThreads')
+    assert(Array.isArray(r.json.staleThreads) && Array.isArray(r.json.absentCharacters), 'arrays missing')
+    assert(r.json.pacing && Array.isArray(r.json.pacing.underMin), 'pacing shape wrong')
+  })
+  await test('Generation queue: status + enqueue mechanics', async () => {
+    const empty = await api('GET', `/projects/${projectId}/generate/queue`)
+    assert(empty.status === 200 && empty.json.summary.total === 0, 'queue not empty for fresh project')
+    // Enqueue this chapter. The background job will fail to reach the (test) LLM,
+    // but the enqueue + status mechanics are what we verify here.
+    const enq = await api('POST', `/projects/${projectId}/generate/queue`, { chapterIds: [chapterId] })
+    assert(enq.status === 200 && enq.json.enqueued === 1, `enqueue failed: ${enq.status}`)
+    assert(Array.isArray(enq.json.jobs) && enq.json.jobs[0].chapterId === chapterId, 'job shape wrong')
+    const after = await api('GET', `/projects/${projectId}/generate/queue`)
+    assert(after.json.summary.total >= 1, 'job not tracked in queue')
   })
 
   log('\nTimeline & Export')
@@ -343,6 +432,7 @@ async function main() {
       ['relationships',  `/projects/${projectId}/relationships`],
       ['lore',           `/projects/${projectId}/lore`],
       ['arcs',           `/projects/${projectId}/arcs`],
+      ['major-arcs',     `/projects/${projectId}/major-arcs`],
       ['threads',        `/projects/${projectId}/threads`],
       ['foreshadowing',  `/projects/${projectId}/foreshadowing`],
       ['style-profiles', `/projects/${projectId}/style-profiles`],

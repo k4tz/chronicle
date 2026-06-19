@@ -11,6 +11,7 @@ import LorePage from './pages/Lore'
 import StoryArcsPage from './pages/StoryArcs'
 import PlotThreadsPage from './pages/PlotThreads'
 import ForeshadowingPage from './pages/Foreshadowing'
+import ArcPlannerPage from './pages/ArcPlanner'
 import IdeasPage from './pages/Ideas'
 import RelationshipsPage from './pages/Relationships'
 import StyleProfilesPage from './pages/StyleProfiles'
@@ -45,6 +46,9 @@ function App() {
           <Route path="projects/:projectId/characters" element={<CharactersPage />} />
           <Route path="projects/:projectId/locations" element={<LocationsPage />} />
           <Route path="projects/:projectId/lore" element={<LorePage />} />
+          <Route path="projects/:projectId/arc-planner" element={<ArcPlannerPage />} />
+          {/* Legacy planning modules — consolidated into Arc Planner (E2). Routes
+              kept so existing deep links / the Timeline's source data still resolve. */}
           <Route path="projects/:projectId/arcs" element={<StoryArcsPage />} />
           <Route path="projects/:projectId/threads" element={<PlotThreadsPage />} />
           <Route path="projects/:projectId/foreshadowing" element={<ForeshadowingPage />} />

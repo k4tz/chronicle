@@ -48,6 +48,29 @@ export function useProject(id: string | null) {
   })
 }
 
+// A plausible full Project row for optimistic inserts (replaced by the real row
+// on settle). Mirrors the server's create defaults.
+function optimisticProject(data: CreateProjectInput): Project {
+  const now = new Date().toISOString()
+  return {
+    id: `optimistic-${now}`,
+    title: data.title,
+    logline: data.logline ?? null,
+    genre: data.genre ?? null,
+    tone: data.tone ?? null,
+    contentRating: data.contentRating ?? 'general',
+    pov: data.pov ?? 'third-limited',
+    targetWordCount: data.targetWordCount ?? 100000,
+    currentWordCount: 0,
+    recentChaptersCount: 3,
+    minRecentChapters: 1,
+    maxRecentChapters: 5,
+    minWordCountPerChapter: 2000,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
 export function useCreateProject() {
   const queryClient = useQueryClient()
 
@@ -56,7 +79,17 @@ export function useCreateProject() {
       const response = await apiClient.post<Project>('/projects', data)
       return response.data
     },
-    onSuccess: () => {
+    // Optimistic: show the new project in the list immediately, roll back on error.
+    onMutate: async (data) => {
+      await queryClient.cancelQueries({ queryKey: ['projects'] })
+      const previous = queryClient.getQueryData<Project[]>(['projects'])
+      queryClient.setQueryData<Project[]>(['projects'], (old) => [...(old || []), optimisticProject(data)])
+      return { previous }
+    },
+    onError: (_err, _data, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(['projects'], ctx.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
     },
   })
@@ -70,7 +103,18 @@ export function useDeleteProject() {
       const response = await apiClient.delete(`/projects/${id}`)
       return response.data
     },
-    onSuccess: () => {
+    // Optimistic: remove the row immediately so the list doesn't wait on the
+    // round-trip; restore it if the delete fails.
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ['projects'] })
+      const previous = queryClient.getQueryData<Project[]>(['projects'])
+      queryClient.setQueryData<Project[]>(['projects'], (old) => (old || []).filter((p) => p.id !== id))
+      return { previous }
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(['projects'], ctx.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
     },
   })
