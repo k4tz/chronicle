@@ -1,12 +1,10 @@
 // server/src/index.ts
+import './env'
 import express from 'express'
 import cors from 'cors'
 import { llmService } from './services/llmService'
 import { dbReady } from './db'
 import { initKbFts } from './services/kbService'
-
-// Load environment variables from .env file
-import 'dotenv/config'
 
 // Import routes
 import * as projectsRoutes from './routes/projects'

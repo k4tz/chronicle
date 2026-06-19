@@ -1,4 +1,5 @@
 // server/src/db/index.ts
+import '../env'
 import { drizzle } from 'drizzle-orm/libsql'
 import { eq } from 'drizzle-orm'
 import { createClient } from '@libsql/client'

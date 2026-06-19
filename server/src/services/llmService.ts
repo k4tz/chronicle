@@ -1,6 +1,7 @@
 // server/src/services/llmService.ts
 'use strict'
 
+import '../env'
 import { LLMService, GenerationRequest, ExtractedEntities, ConsistencyFlag, StyleProfile } from '../types/services'
 import { JsonSchema, ENTITIES_SCHEMA, CONSISTENCY_FLAGS_SCHEMA, STYLE_PROFILE_SCHEMA } from './schemas'
 import fetch from 'node-fetch'

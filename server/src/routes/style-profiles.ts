@@ -1,4 +1,5 @@
 // server/src/routes/style-profiles.ts
+import '../env'
 import { Router } from 'express'
 import { nanoid } from 'nanoid'
 import { db, eq } from '../db'
