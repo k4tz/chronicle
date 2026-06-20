@@ -10,7 +10,7 @@ import fetch from 'node-fetch'
  * Strips thinking/reasoning tags from reasoning model outputs.
  * Models like Qwen may output <think>...</think> or <thought>...</thought> tags.
  */
-function stripThinkingTags(text: string): string {
+export function stripThinkingTags(text: string): string {
   if (!text) return text
 
   let result = text

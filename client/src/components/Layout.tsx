@@ -2,7 +2,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useProjectsStore } from '../store/projects'
-import DarkModeToggle from './DarkModeToggle'
 import ErrorBoundary from './ErrorBoundary'
 import CommandPalette, { Command } from './CommandPalette'
 
@@ -59,7 +58,6 @@ export default function Layout() {
         <button onClick={() => navigate('/')} className="text-xl font-bold hover:text-blue-400 transition">
           Chronicle
         </button>
-        <div className="mt-2"><DarkModeToggle /></div>
       </div>
 
       <nav className="flex-1 p-4 overflow-y-auto">

@@ -1,12 +1,30 @@
 // server/src/routes/llm-generate.ts
 import { Router } from 'express'
+import * as fs from 'fs'
+import * as path from 'path'
 import { llmService } from '../services/llmService'
 import type { GenerationRequest } from '../types/services'
-import { JsonSchema, WORLD_SCHEMA, CHARACTER_SCHEMA, LOCATION_SCHEMA } from '../services/schemas'
+import { JsonSchema, WORLD_SCHEMA, CHARACTER_SCHEMA, LOCATION_SCHEMA, LORE_SCHEMA } from '../services/schemas'
 import { ideasService } from '../services/ideasService'
 import { db, eq } from '../db'
-import { worldFoundations, characters, locations } from '../db/schema'
+import { worldFoundations, characters, locations, loreEntries } from '../db/schema'
 import { nanoid } from 'nanoid'
+
+// Compact world-foundation context used to ground entity generation so created
+// lore/locations stay consistent with the established world.
+async function buildWorldContext(projectId: string): Promise<string> {
+  const world = await db.select().from(worldFoundations).where(eq(worldFoundations.projectId, projectId)).get()
+  if (!world) return ''
+  const parts = [
+    world.cosmology && `Cosmology: ${world.cosmology}`,
+    world.history && `History: ${world.history}`,
+    world.geography && `Geography: ${world.geography}`,
+    world.politicalLandscape && `Politics: ${world.politicalLandscape}`,
+    world.culture && `Culture: ${world.culture}`,
+    world.magicOrTechRules && `Magic/Tech: ${world.magicOrTechRules}`,
+  ].filter(Boolean) as string[]
+  return parts.join('\n').slice(0, 3000)
+}
 
 const router = Router()
 
@@ -305,5 +323,75 @@ Fantasy novel setting. Make it vivid and immersive.`
     res.status(500).json({ error: 'Failed to generate location', details: errorMsg })
   }
 })
+
+// POST /api/projects/:projectId/generate/lore - Generate a lore entry
+router.post('/projects/:projectId/generate/lore', async (req, res) => {
+  try {
+    const { projectId } = req.params
+    const { topic, category, notes } = req.body
+
+    if (!topic) return res.status(400).json({ error: 'Lore topic required' })
+
+    // Ground the entry in the established world + relevant ideas.
+    const worldContext = await buildWorldContext(projectId)
+    const loreIdeas = await ideasService.getIdeasForCategory(projectId, 'world')
+    const ideasContext = loreIdeas.length > 0 ? ideasService.formatIdeasForPrompt(loreIdeas.slice(0, 3)) : ''
+
+    const template = loadPrompt('lore-generation')
+    const userPrompt = substituteTemplate(template, {
+      topic,
+      category: category || 'any fitting category',
+      notes: notes || 'none',
+      worldContext: (worldContext + (ideasContext ? '\n\n' + ideasContext : '')) || 'No world foundation defined yet.',
+    })
+
+    const loreData = await completeStructuredWithRetry<Record<string, string>>({
+      systemPrompt: 'Output ONLY valid JSON. No other text, markdown, or explanation. Keys: title, category, content, tags (all strings).',
+      userPrompt,
+      maxTokens: 2000,
+      temperature: 0.85,
+    }, LORE_SCHEMA, 'lore', 'Lore generation')
+
+    if (!loreData.title || !loreData.content) {
+      throw new Error('Lore title and content are required')
+    }
+
+    const id = nanoid()
+    const now = new Date().toISOString()
+    await db.insert(loreEntries).values({
+      id,
+      projectId,
+      category: normalizeString(loreData.category, category || 'custom') || 'custom',
+      title: normalizeString(loreData.title, 'Untitled Lore'),
+      content: normalizeString(loreData.content),
+      tags: normalizeString(loreData.tags),
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    const created = await db.select().from(loreEntries).where(eq(loreEntries.id, id)).get()
+    if (!created) throw new Error('Failed to retrieve created lore entry')
+
+    res.json({ success: true, lore: created })
+  } catch (error) {
+    console.error('Error generating lore:', error)
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    res.status(500).json({ error: 'Failed to generate lore', details: errorMsg })
+  }
+})
+
+// Load the prompt template for lore generation; kept module-level so it errors
+// loudly at first use if the file is missing rather than silently degrading.
+function loadPrompt(name: string): string {
+  return fs.readFileSync(path.join(__dirname, '../prompts', `${name}.md`), 'utf-8')
+}
+
+function substituteTemplate(template: string, vars: Record<string, string>): string {
+  let result = template
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replace(new RegExp(`{{${key}}}`, 'g'), value ?? '')
+  }
+  return result
+}
 
 export const app = router

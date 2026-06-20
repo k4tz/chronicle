@@ -4,13 +4,18 @@ import { db, eq } from '../db'
 import {
   projects, characters, locations, storyArcs, plotThreads,
   stateSnapshots, chapters, kbEntries, ideas, characterStates, locationStates,
-  loreEntries
+  loreEntries, worldFoundations
 } from '../db/schema'
 import { countTokens, truncateToSentence } from './tokenizer'
 import { cacheService } from './cacheService'
 import { llmService } from './llmService'
 import { rankByRelevance } from './retrieval'
-import { buildArcContextBlock } from './arcPlannerService'
+import { buildArcContextBlock, getArcPinnedEntities } from './arcPlannerService'
+import { kbService } from './kbService'
+
+// Per-field cap (chars) for the world-foundation block so a richly-seeded world
+// can't single-handedly blow the context budget but still always reaches the model.
+const WORLD_FIELD_CAP = 700
 
 export interface AssembledContext {
   tier1: string        // Core context (~1000 tokens)
@@ -52,6 +57,7 @@ export interface ChapterContextConfig {
 const MAX_CHARACTERS = 8
 const MAX_LOCATIONS = 6
 const MAX_LORE = 6
+const MAX_KB = 6
 
 export class ContextAssemblyEngine {
   // Token budget calculated from environment variables
@@ -131,6 +137,13 @@ export class ContextAssemblyEngine {
     // Drives retrieval when explicit entity ids aren't pinned.
     const relevanceQuery = [queryText, project.logline, project.title].filter(Boolean).join('\n')
 
+    // Pin the entities the author attached to this chapter's arc/sub-arc so they
+    // are ALWAYS included (full profile), not left to relevance retrieval. This
+    // is the fix for "added a character to the arc but it's ignored at gen time".
+    const arcPinned = await getArcPinnedEntities(projectId, chapterNumber)
+    const pinnedCharacterIds = [...new Set([...relevantCharacterIds, ...arcPinned.characterIds])]
+    const pinnedLoreIds = [...new Set(arcPinned.loreIds)]
+
     // Characters: pinned ids always included; otherwise retrieve the most
     // relevant to this chapter (was previously "only whatever ids were passed",
     // which left the context empty for the draft pass that pins nothing).
@@ -144,7 +157,7 @@ export class ContextAssemblyEngine {
       relevanceQuery,
       allCharacters,
       (c) => [c.name, c.aliases, c.personality, c.motivation, c.background, c.abilities].filter(Boolean).join(' '),
-      relevantCharacterIds,
+      pinnedCharacterIds,
       MAX_CHARACTERS,
     )
 
@@ -168,6 +181,33 @@ export class ContextAssemblyEngine {
 
     // Tier 2: Chapter-relevant full profiles
     const tier2Parts: string[] = []
+
+    // World foundation — the seeded canon (cosmology/history/geography/etc.).
+    // This was previously NEVER included in generation context, so the authored
+    // world had no influence on what the model wrote. Include it (per-field
+    // capped) so world data is actually used. Budget compression can trim it.
+    const world = await db
+      .select()
+      .from(worldFoundations)
+      .where(eq(worldFoundations.projectId, projectId))
+      .get()
+    if (world) {
+      const cap = (v: string | null) => (v ? truncateToSentence(v, Math.ceil(WORLD_FIELD_CAP / 4)) : null)
+      const worldLines: Array<string | null> = [
+        world.cosmology ? `Cosmology: ${cap(world.cosmology)}` : null,
+        world.history ? `History: ${cap(world.history)}` : null,
+        world.geography ? `Geography: ${cap(world.geography)}` : null,
+        world.politicalLandscape ? `Politics: ${cap(world.politicalLandscape)}` : null,
+        world.economy ? `Economy: ${cap(world.economy)}` : null,
+        world.culture ? `Culture: ${cap(world.culture)}` : null,
+        world.magicOrTechRules ? `Magic/Tech rules: ${cap(world.magicOrTechRules)}` : null,
+      ]
+      const worldBody = worldLines.filter(Boolean).join('\n')
+      if (worldBody.trim()) {
+        tier2Parts.push('=== WORLD FOUNDATION (canon) ===')
+        tier2Parts.push(worldBody)
+      }
+    }
 
     // Full character profiles for the selected characters
     if (chapterCharacters.length > 0) {
@@ -228,7 +268,7 @@ export class ContextAssemblyEngine {
       relevanceQuery,
       allLore,
       (l) => [l.title, l.category, l.content, l.tags].filter(Boolean).join(' '),
-      [],
+      pinnedLoreIds,
       MAX_LORE,
     )
     if (chapterLore.length > 0) {
@@ -236,6 +276,23 @@ export class ContextAssemblyEngine {
       for (const lore of chapterLore) {
         tier2Parts.push(`\n## ${lore.title} (${lore.category})\n${lore.content}`)
       }
+    }
+
+    // Evolved canon from the Knowledge Bank (facts merged in at finalize time via
+    // applyKBUpdates). These never reached generation context before, so KB
+    // evolution had no effect on later chapters. Surface the most relevant ones.
+    try {
+      const kbHits = (await kbService.search(projectId, relevanceQuery || project.title))
+        .filter(e => !e.entityType.endsWith('_version'))
+        .slice(0, MAX_KB)
+      if (kbHits.length > 0) {
+        tier2Parts.push('\n=== EVOLVED CANON (Knowledge Bank) ===')
+        for (const e of kbHits) {
+          tier2Parts.push(`- [${e.entityType}] ${truncateToSentence(e.content, 150)}`)
+        }
+      }
+    } catch (err) {
+      console.warn('KB context lookup failed (non-fatal):', (err as Error).message)
     }
 
     // Active plot threads

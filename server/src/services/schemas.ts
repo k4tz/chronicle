@@ -264,6 +264,19 @@ export const LOCATION_SCHEMA: JsonSchema = {
   },
 }
 
+// llm-generate lore generation (lore-generation.md)
+export const LORE_SCHEMA: JsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['title', 'category', 'content', 'tags'],
+  properties: {
+    title: str,
+    category: enumStr(['event', 'artifact', 'organization', 'species', 'religion', 'location', 'custom']),
+    content: str,
+    tags: str,
+  },
+}
+
 // chapter-generate entity-extraction route (entity-extraction.md)
 export const ENTITY_EXTRACTION_SCHEMA: JsonSchema = {
   type: 'object',

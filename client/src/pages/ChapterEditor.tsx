@@ -3,11 +3,19 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   chaptersApi, charactersApi, locationsApi, styleProfilesApi, generationApi,
-  Chapter, ChapterVersion, Character, Location, StyleProfileRecord,
-  CharacterState, LocationState, OpenThread
+  Chapter, Character, Location, StyleProfileRecord,
+  CharacterState, LocationState, OpenThread, ChapterStages, PipelineStage
 } from '../api/api'
 import GenerationPanel from '../components/GenerationPanel'
 import NovelEditor, { EntityRef } from '../components/NovelEditor'
+
+type Stage = 'OUTLINE' | 'DRAFT' | 'FINAL'
+const STAGE_TABS: { stage: Stage; label: string }[] = [
+  { stage: 'OUTLINE', label: 'Outline' },
+  { stage: 'DRAFT', label: 'Draft' },
+  { stage: 'FINAL', label: 'Final' },
+]
+const toStage = (s: PipelineStage): Stage => s.toUpperCase() as Stage
 
 export default function ChapterEditorPage() {
   const { projectId, chapterId } = useParams<{ projectId: string; chapterId: string }>()
@@ -15,7 +23,8 @@ export default function ChapterEditorPage() {
 
   const [loading, setLoading] = useState(true)
   const [chapter, setChapter] = useState<Chapter | null>(null)
-  const [versions, setVersions] = useState<ChapterVersion[]>([])
+  const [stages, setStages] = useState<ChapterStages>({ OUTLINE: null, DRAFT: null, FINAL: null })
+  const [currentStage, setCurrentStage] = useState<Stage>('DRAFT')
   const [characters, setCharacters] = useState<Character[]>([])
   const [locations, setLocations] = useState<Location[]>([])
   const [styleProfiles, setStyleProfiles] = useState<StyleProfileRecord[]>([])
@@ -76,7 +85,7 @@ export default function ChapterEditorPage() {
 
   useEffect(() => { loadAllData() }, [projectId, chapterId])
 
-  const loadAllData = () => {
+  const loadAllData = (preferredStage?: Stage) => {
     if (!projectId || !chapterId) return
     setLoading(true)
     Promise.all([
@@ -86,13 +95,16 @@ export default function ChapterEditorPage() {
       styleProfilesApi.list(projectId),
     ]).then(([chapterData, chars, locs, profiles]) => {
       setChapter(chapterData.chapter)
-      setVersions(chapterData.versions)
       setStyleProfiles(profiles)
 
-      // Get latest version content
-      const loaded = chapterData.versions.length > 0
-        ? chapterData.versions[chapterData.versions.length - 1].content
-        : ''
+      // Load the most-advanced stage that has content (Final → Draft → Outline),
+      // honouring an explicit preference (e.g. the stage just generated/edited).
+      const st = chapterData.stages || { OUTLINE: null, DRAFT: null, FINAL: null }
+      setStages(st)
+      const order: Stage[] = ['FINAL', 'DRAFT', 'OUTLINE']
+      const pick: Stage = (preferredStage && st[preferredStage]) ? preferredStage : (order.find(s => st[s]) || 'OUTLINE')
+      setCurrentStage(pick)
+      const loaded = st[pick]?.content ?? ''
       setContent(loaded)
       // Loaded content is already persisted — start clean so we don't autosave it.
       savedContentRef.current = loaded
@@ -162,12 +174,14 @@ export default function ChapterEditorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content])
 
+  // Autosave writes back to whichever stage is currently loaded, so editing the
+  // Outline updates the Outline version (not a separate MANUAL row).
   const autoSave = async () => {
     if (!projectId || !chapterId) return
     if (content === savedContentRef.current) return
     setAutoStatus('saving')
     try {
-      await chaptersApi.saveVersion(projectId, chapterId, content, 'MANUAL')
+      await chaptersApi.saveVersion(projectId, chapterId, content, currentStage)
       savedContentRef.current = content
       dirtyRef.current = false
       setLastSavedAt(new Date())
@@ -178,17 +192,17 @@ export default function ChapterEditorPage() {
     }
   }
 
-  const handleSave = async (passType: 'DRAFT' | 'MANUAL' | 'FINAL') => {
+  const handleSave = async () => {
     if (!projectId || !chapterId) return
     if (debounceRef.current) clearTimeout(debounceRef.current)
     setSaving(true)
     try {
-      await chaptersApi.saveVersion(projectId, chapterId, content, passType)
+      await chaptersApi.saveVersion(projectId, chapterId, content, currentStage)
       savedContentRef.current = content
       dirtyRef.current = false
       setLastSavedAt(new Date())
       setAutoStatus('saved')
-      loadAllData()
+      loadAllData(currentStage)
     } catch (error) {
       console.error('Failed to save:', error)
       setAutoStatus('error')
@@ -197,19 +211,29 @@ export default function ChapterEditorPage() {
     }
   }
 
-  // Called by GenerationPanel after each pass. The server already persisted a
-  // version; reflect the new text in the editor and refresh version/status info
-  // without clobbering the freshly generated content.
-  const handleGenerated = async (newContent: string) => {
+  // Switch which saved stage is loaded into the editor for viewing/editing.
+  const loadStage = (stage: Stage) => {
+    const v = stages[stage]
+    setContent(v?.content ?? '')
+    setCurrentStage(stage)
+    savedContentRef.current = v?.content ?? ''
+    dirtyRef.current = false
+    setAutoStatus('idle')
+  }
+
+  // Called by GenerationPanel as a stage streams and on completion. The server
+  // already persisted each stage; reflect the text + active stage and refresh
+  // stage/version metadata without clobbering the freshly generated content.
+  const handleGenerated = async (newContent: string, stage: PipelineStage) => {
     setContent(newContent)
-    // Server already saved this as a version; don't let autosave duplicate it.
+    setCurrentStage(toStage(stage))
     savedContentRef.current = newContent
     dirtyRef.current = false
     if (!projectId || !chapterId) return
     try {
       const data = await chaptersApi.get(projectId, chapterId)
       setChapter(data.chapter)
-      setVersions(data.versions)
+      setStages(data.stages)
     } catch (error) {
       console.error('Failed to refresh chapter after generation:', error)
     }
@@ -333,15 +357,6 @@ export default function ChapterEditorPage() {
     }))
   }
 
-  const loadVersion = (version: ChapterVersion) => {
-    setContent(version.content)
-    // This version is already persisted; treat it as clean until the user edits.
-    savedContentRef.current = version.content
-    dirtyRef.current = false
-    setAutoStatus('idle')
-    setShowVersions(false)
-  }
-
   if (loading || !chapter) return <div className="p-8">Loading chapter...</div>
 
   return (
@@ -387,7 +402,7 @@ export default function ChapterEditorPage() {
             onClick={() => setShowVersions(!showVersions)}
             className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700"
           >
-            📜 Versions ({versions.length})
+            📜 Stages
           </button>
           <button
             onClick={() => setShowSnapshot(!showSnapshot)}
@@ -396,11 +411,12 @@ export default function ChapterEditorPage() {
             📋 State Snapshot
           </button>
           <button
-            onClick={() => handleSave('MANUAL')}
+            onClick={handleSave}
             disabled={saving}
             className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            title={`Save the ${currentStage.toLowerCase()} version`}
           >
-            {saving ? 'Saving...' : 'Save'}
+            {saving ? 'Saving...' : `Save ${currentStage.charAt(0) + currentStage.slice(1).toLowerCase()}`}
           </button>
         </div>
       </div>
@@ -412,34 +428,44 @@ export default function ChapterEditorPage() {
             projectId={projectId!}
             chapterId={chapterId!}
             styleProfiles={styleProfiles}
+            defaultStyleProfileId={chapter.styleProfileId}
+            existingStages={{ outline: !!stages.OUTLINE, draft: !!stages.DRAFT, final: !!stages.FINAL }}
             currentContent={content}
             onGenerate={handleGenerated}
           />
         </div>
       )}
 
-      {/* Version History Drawer */}
+      {/* Stage drawer — the 3 canonical versions (outline / draft / final) */}
       {showVersions && (
         <div className="mb-6 bg-white dark:bg-gray-800 p-4 rounded-lg shadow">
-          <h3 className="font-semibold mb-3">Chapter Versions</h3>
-          <div className="space-y-2 max-h-64 overflow-y-auto">
-            {versions.map((v) => (
-              <div key={v.id} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
-                <div>
-                  <span className="font-medium">{v.passType}</span>
-                  <span className="text-gray-500 text-sm ml-2">
-                    {new Date(v.createdAt).toLocaleString()}
-                  </span>
-                  <span className="text-gray-400 text-sm ml-2">{v.wordCount} words</span>
+          <h3 className="font-semibold mb-3 text-gray-900 dark:text-gray-100">Chapter Stages</h3>
+          <div className="space-y-2">
+            {STAGE_TABS.map(({ stage, label }) => {
+              const v = stages[stage]
+              return (
+                <div key={stage} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-700 rounded">
+                  <div>
+                    <span className="font-medium text-gray-900 dark:text-gray-100">{label}</span>
+                    {v ? (
+                      <>
+                        <span className="text-gray-500 dark:text-gray-400 text-sm ml-2">{new Date(v.createdAt).toLocaleString()}</span>
+                        <span className="text-gray-400 text-sm ml-2">{v.wordCount.toLocaleString()} words</span>
+                      </>
+                    ) : (
+                      <span className="text-gray-400 text-sm ml-2">— not generated yet</span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => { loadStage(stage); setShowVersions(false) }}
+                    disabled={!v}
+                    className="text-sm text-blue-600 hover:underline disabled:text-gray-400 disabled:no-underline disabled:cursor-default"
+                  >
+                    Load
+                  </button>
                 </div>
-                <button
-                  onClick={() => loadVersion(v)}
-                  className="text-sm text-blue-600 hover:underline"
-                >
-                  Load
-                </button>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
@@ -647,6 +673,29 @@ export default function ChapterEditorPage() {
           <button onClick={() => setShowFind(false)} className="px-2 py-1.5 text-sm text-gray-500 hover:text-gray-700">✕</button>
         </div>
       )}
+
+      {/* Stage selector — load & edit any stage; regenerate from the Generate panel */}
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className="text-sm text-gray-500 dark:text-gray-400">Editing stage:</span>
+        {STAGE_TABS.map(({ stage, label }) => {
+          const v = stages[stage]
+          const active = currentStage === stage
+          return (
+            <button
+              key={stage}
+              onClick={() => loadStage(stage)}
+              className={`px-3 py-1.5 rounded text-sm border transition ${
+                active
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+              title={v ? `${v.wordCount.toLocaleString()} words` : 'Not generated yet'}
+            >
+              {label} <span className={active ? 'text-blue-100' : 'text-gray-400'}>{v ? `(${v.wordCount.toLocaleString()})` : '(empty)'}</span>
+            </button>
+          )
+        })}
+      </div>
 
       {/* Chapter Editor */}
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow px-6 py-2">

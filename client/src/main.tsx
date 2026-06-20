@@ -5,6 +5,11 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import './index.css'
 
+// Dark theme is permanent — always apply the `dark` class and clean up any
+// legacy light-mode preference so the toggle can't be re-enabled accidentally.
+document.documentElement.classList.add('dark')
+try { localStorage.removeItem('darkMode') } catch { /* ignore */ }
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

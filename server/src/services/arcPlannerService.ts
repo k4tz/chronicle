@@ -547,6 +547,44 @@ export async function buildArcContextBlock(projectId: string, chapterNumber: num
   return formatSubArcContextForPrompt(ctx, events)
 }
 
+/**
+ * Character/lore ids the author selected on the arc-planner for this chapter.
+ * The context engine PINS these so the selected entities' full profiles are
+ * always included in generation context — fixes "added a character to the arc
+ * but it's ignored when generating the chapter". Empty when no plan exists.
+ */
+export async function getArcPinnedEntities(
+  projectId: string,
+  chapterNumber: number,
+): Promise<{ characterIds: string[]; loreIds: string[] }> {
+  const characterIds = new Set<string>()
+  const loreIds = new Set<string>()
+
+  const subArc = await getSubArcForChapter(projectId, chapterNumber)
+  if (subArc) {
+    for (const c of subArc.charactersInvolved) {
+      if (c.presenceLevel !== 'absent' && c.characterId) characterIds.add(c.characterId)
+    }
+    for (const p of subArc.plotPoints) {
+      for (const cid of p.linkedCharacters || []) if (cid) characterIds.add(cid)
+      for (const lid of p.linkedLore || []) if (lid) loreIds.add(lid)
+    }
+    for (const l of [...subArc.loreIntroduced, ...subArc.loreDeveloped, ...subArc.loreRevealed]) {
+      if (l.loreId) loreIds.add(l.loreId)
+    }
+
+    const parentArc = await getMajorArc(subArc.parentArcId)
+    if (parentArc) {
+      for (const c of parentArc.characters) if (c.characterId) characterIds.add(c.characterId)
+      for (const l of [...parentArc.loreIntroduced, ...parentArc.loreDeveloped]) {
+        if (l.loreId) loreIds.add(l.loreId)
+      }
+    }
+  }
+
+  return { characterIds: [...characterIds], loreIds: [...loreIds] }
+}
+
 // ---------------------------------------------------------------------------
 // Mutations (used by routes)
 // ---------------------------------------------------------------------------

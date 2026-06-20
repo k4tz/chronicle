@@ -64,6 +64,11 @@ export const locationsApi = {
   async delete(projectId: string, id: string): Promise<void> {
     await apiClient.delete(`/projects/${projectId}/locations/${id}`)
   },
+
+  async generate(projectId: string, data: { type: string; purpose?: string; atmosphere?: string }): Promise<{ success: boolean; location: Location }> {
+    const response = await apiClient.post(`/projects/${projectId}/generate/location`, data)
+    return response.data
+  },
 }
 
 // Character
@@ -110,6 +115,11 @@ export const charactersApi = {
 
   async delete(projectId: string, id: string): Promise<void> {
     await apiClient.delete(`/projects/${projectId}/characters/${id}`)
+  },
+
+  async generate(projectId: string, data: { role: string; archetype?: string; traits?: string }): Promise<{ success: boolean; character: Character }> {
+    const response = await apiClient.post(`/projects/${projectId}/generate/character`, data)
+    return response.data
   },
 }
 
@@ -175,6 +185,11 @@ export const loreApi = {
 
   async delete(projectId: string, id: string): Promise<void> {
     await apiClient.delete(`/projects/${projectId}/lore/${id}`)
+  },
+
+  async generate(projectId: string, data: { topic: string; category?: string; notes?: string }): Promise<{ success: boolean; lore: LoreEntry }> {
+    const response = await apiClient.post(`/projects/${projectId}/generate/lore`, data)
+    return response.data
   },
 }
 
@@ -658,9 +673,18 @@ export interface StateSnapshot {
   createdAt: string
 }
 
+export interface ChapterStages {
+  OUTLINE: ChapterVersion | null
+  DRAFT: ChapterVersion | null
+  FINAL: ChapterVersion | null
+}
+
+export type PipelineStage = 'outline' | 'draft' | 'final'
+
 export interface ChapterWithRelations {
   chapter: Chapter
   versions: ChapterVersion[]
+  stages: ChapterStages
   snapshot: StateSnapshot | null
 }
 
@@ -844,6 +868,37 @@ export const generationApi = {
   async getQueue(projectId: string): Promise<{ summary: { total: number; queued: number; running: number; done: number; error: number }; jobs: QueueJob[] }> {
     const response = await apiClient.get(`/projects/${projectId}/generate/queue`)
     return response.data
+  },
+
+  // Unified outline→draft→final pipeline (SSE). `target` = how far to go;
+  // `from` = which stage to (re)generate (earlier stages are reused). Powers
+  // both "generate to Final in one go" and "regenerate just this stage".
+  async streamPipeline(projectId: string, chapterId: string, opts: {
+    target: PipelineStage
+    from?: PipelineStage
+    wordCount?: number
+    tension?: number
+    focus?: string
+    styleProfileId?: string
+    characterIds?: string[]
+    locationIds?: string[]
+  }): Promise<ReadableStream<Uint8Array>> {
+    const params = new URLSearchParams()
+    params.set('target', opts.target)
+    if (opts.from) params.set('from', opts.from)
+    if (opts.wordCount != null) params.set('wordCount', String(opts.wordCount))
+    if (opts.tension != null) params.set('tension', String(opts.tension))
+    if (opts.focus) params.set('focus', opts.focus)
+    if (opts.styleProfileId) params.set('styleProfileId', opts.styleProfileId)
+    if (opts.characterIds?.length) params.set('charIds', opts.characterIds.join(','))
+    if (opts.locationIds?.length) params.set('locIds', opts.locationIds.join(','))
+    const url = `${API_BASE_URL}/projects/${projectId}/chapters/${chapterId}/generate/pipeline?${params}`
+    const response = await fetch(url, { method: 'GET', headers: { 'Content-Type': 'text/event-stream' } })
+    if (!response.ok || !response.body) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(`Generation failed (${response.status}). ${detail}`)
+    }
+    return response.body
   },
 
   async generateDraft(projectId: string, chapterId: string, styleProfileId?: string): Promise<ReadableStream<Uint8Array>> {

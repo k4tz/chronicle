@@ -1,7 +1,7 @@
 // client/src/pages/Chapters.tsx
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { chaptersApi, Chapter, arcsApi, styleProfilesApi, StoryArc, StyleProfileRecord } from '../api/api'
+import { chaptersApi, Chapter, arcsApi, styleProfilesApi, StoryArc, StyleProfileRecord, generationApi, PipelineStage, QueueJob } from '../api/api'
 
 export default function ChaptersPage() {
   const { projectId } = useParams<{ projectId: string }>()
@@ -13,6 +13,11 @@ export default function ChaptersPage() {
   const [styleProfiles, setStyleProfiles] = useState<StyleProfileRecord[]>([])
   const [showForm, setShowForm] = useState(false)
   const [editingChapter, setEditingChapter] = useState<Chapter | null>(null)
+  // Outer-menu generation: pick how far to take a chapter, run it in the
+  // background queue (outline → draft → final per the target).
+  const [genTarget, setGenTarget] = useState<PipelineStage>('final')
+  const [queue, setQueue] = useState<{ summary: { total: number; queued: number; running: number; done: number; error: number }; jobs: QueueJob[] } | null>(null)
+  const [polling, setPolling] = useState(false)
   const [formData, setFormData] = useState<Partial<Chapter>>({
     number: 1,
     title: '',
@@ -56,6 +61,36 @@ export default function ChaptersPage() {
     }
   }
 
+  // Poll the generation queue while there's active work; reload chapters when it
+  // drains so statuses/word counts reflect the finished background runs.
+  useEffect(() => {
+    if (!projectId || !polling) return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const q = await generationApi.getQueue(projectId)
+        if (cancelled) return
+        setQueue(q)
+        if (q.summary.queued + q.summary.running === 0) { setPolling(false); loadAllData() }
+      } catch { /* transient */ }
+    }
+    tick()
+    const id = setInterval(tick, 4000)
+    return () => { cancelled = true; clearInterval(id) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, polling])
+
+  const handleGenerate = async (chapterId: string) => {
+    if (!projectId) return
+    try {
+      await generationApi.enqueueGeneration(projectId, [chapterId], { target: genTarget })
+      setPolling(true)
+    } catch (error) {
+      console.error('Failed to enqueue generation:', error)
+      alert('Failed to start generation. Is the server running?')
+    }
+  }
+
   const handleEdit = (chapter: Chapter) => {
     setEditingChapter(chapter)
     setFormData({
@@ -95,6 +130,18 @@ export default function ChaptersPage() {
           <button onClick={() => navigate(`/projects/${projectId}`)} className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200">
             ← Back to Project
           </button>
+          <div className="flex items-center gap-2" title="How far the background generator should take a chapter">
+            <span className="text-sm text-gray-500 dark:text-gray-400">Generate to</span>
+            <select
+              value={genTarget}
+              onChange={(e) => setGenTarget(e.target.value as PipelineStage)}
+              className="px-3 py-2 border rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 border-gray-300 dark:border-gray-600 text-sm"
+            >
+              <option value="outline">Outline</option>
+              <option value="draft">Draft</option>
+              <option value="final">Final</option>
+            </select>
+          </div>
           <button
             onClick={() => { setShowForm(!showForm); setEditingChapter(null); setFormData({ number: chapters.length + 1, title: '', arcId: '', styleProfileId: '', status: 'outline' }) }}
             className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
@@ -103,6 +150,13 @@ export default function ChaptersPage() {
           </button>
         </div>
       </div>
+
+      {queue && queue.summary.total > 0 && (queue.summary.queued + queue.summary.running > 0 || queue.summary.error > 0) && (
+        <div className="mb-6 px-4 py-3 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 text-sm text-gray-700 dark:text-gray-200">
+          Background generation — {queue.summary.running} running, {queue.summary.queued} queued, {queue.summary.done} done
+          {queue.summary.error > 0 && <span className="text-red-500"> · {queue.summary.error} failed</span>}
+        </div>
+      )}
 
       {showForm && (
         <form onSubmit={handleSubmit} className="mb-8 bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
@@ -203,6 +257,19 @@ export default function ChaptersPage() {
               </div>
             </div>
             <div className="flex gap-2">
+              {(() => {
+                const job = queue?.jobs.find(j => j.chapterId === chapter.id && (j.status === 'queued' || j.status === 'running'))
+                return (
+                  <button
+                    onClick={() => handleGenerate(chapter.id)}
+                    disabled={!!job}
+                    className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 text-sm disabled:opacity-50"
+                    title={`Generate up to ${genTarget} in the background`}
+                  >
+                    {job ? (job.status === 'running' ? '⏳ Generating…' : 'Queued…') : '✨ Generate'}
+                  </button>
+                )
+              })()}
               <button
                 onClick={() => navigate(`/projects/${projectId}/chapters/${chapter.id}`)}
                 className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"

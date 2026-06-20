@@ -1,10 +1,64 @@
 // server/src/routes/chapters.ts
 import { Router } from 'express'
+import { and } from 'drizzle-orm'
 import { nanoid } from 'nanoid'
 import { db, eq } from '../db'
 import { chapters, chapterVersions, stateSnapshots, projects } from '../db/schema'
 
 const router = Router()
+
+// The three canonical stages a chapter moves through. We keep exactly ONE
+// version row per stage per chapter (newest content wins) instead of appending
+// a new row on every checkpoint/autosave — that proliferation (and tiny
+// mid-stream "1-word" rows) was the "version system is broken" bug.
+export const STAGES = ['OUTLINE', 'DRAFT', 'FINAL'] as const
+export type Stage = (typeof STAGES)[number]
+
+// Map any (incl. legacy) pass type onto a canonical stage.
+export function canonicalStage(passType: string): Stage {
+  if (passType === 'OUTLINE') return 'OUTLINE'
+  if (passType === 'FINAL' || passType === 'STYLE') return 'FINAL'
+  return 'DRAFT' // DRAFT, MANUAL, anything else
+}
+
+export function countWords(content: string): number {
+  return content.split(/\s+/).filter(w => w.length > 0).length
+}
+
+/**
+ * Upsert THE single version row for a chapter's stage and self-heal: any extra
+ * rows that map to the same stage (legacy STYLE/MANUAL/duplicate checkpoints —
+ * the "1-word draft" spam) are collapsed into one. Returns the surviving id.
+ */
+export async function upsertStageVersion(chapterId: string, content: string, passType: string): Promise<string> {
+  const stage = canonicalStage(passType)
+  const wordCount = countWords(content)
+  const now = new Date().toISOString()
+
+  const sameStage = (await db.select().from(chapterVersions).where(eq(chapterVersions.chapterId, chapterId)).all())
+    .filter(v => canonicalStage(v.passType) === stage)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+
+  if (sameStage.length > 0) {
+    const keep = sameStage[sameStage.length - 1]
+    await db.update(chapterVersions).set({ content, passType: stage, wordCount, createdAt: now }).where(eq(chapterVersions.id, keep.id))
+    for (const extra of sameStage.slice(0, -1)) {
+      await db.delete(chapterVersions).where(eq(chapterVersions.id, extra.id))
+    }
+    return keep.id
+  }
+
+  const id = nanoid()
+  await db.insert(chapterVersions).values({ id, chapterId, content, passType: stage, wordCount, createdAt: now })
+  return id
+}
+
+// Recompute and persist the project's total word count from its chapters.
+export async function recalcProjectWords(projectId: string): Promise<void> {
+  const all = await db.select({ wordCount: chapters.wordCount }).from(chapters).where(eq(chapters.projectId, projectId)).all()
+  const total = all.reduce((sum, ch) => sum + (ch.wordCount || 0), 0)
+  await db.update(projects).set({ currentWordCount: total, updatedAt: new Date().toISOString() }).where(eq(projects.id, projectId))
+}
 
 // GET /projects/:projectId/chapters - List all chapters
 router.get('/projects/:projectId/chapters', async (req, res) => {
@@ -91,12 +145,25 @@ router.get('/projects/:projectId/chapters/:chapterId', async (req, res) => {
       .where(eq(stateSnapshots.chapterId, req.params.chapterId))
       .get()
 
+    // Derive the 3 canonical stages (latest row per stage; legacy STYLE counts as
+    // FINAL, MANUAL as DRAFT) so the editor can load/edit Outline, Draft or Final.
+    const stageOf = (pt: string): Stage | null =>
+      pt === 'OUTLINE' ? 'OUTLINE' : pt === 'DRAFT' || pt === 'MANUAL' ? 'DRAFT' : pt === 'STYLE' || pt === 'FINAL' ? 'FINAL' : null
+    const stages: Record<Stage, typeof versions[number] | null> = { OUTLINE: null, DRAFT: null, FINAL: null }
+    for (const v of versions) {
+      const s = stageOf(v.passType)
+      if (!s) continue
+      const cur = stages[s]
+      if (!cur || v.createdAt >= cur.createdAt) stages[s] = v
+    }
+
     res.json({
       chapter,
       versions: versions.map(v => ({
         ...v,
         content: v.content, // Full content
       })),
+      stages,
       snapshot: snapshot ? {
         ...snapshot,
         characterStates: JSON.parse(snapshot.characterStates),
@@ -156,7 +223,7 @@ router.delete('/projects/:projectId/chapters/:chapterId', async (req, res) => {
   }
 })
 
-// POST /projects/:projectId/chapters/:chapterId/versions - Save a new version
+// POST /projects/:projectId/chapters/:chapterId/versions - Save (upsert) a stage version
 router.post('/projects/:projectId/chapters/:chapterId/versions', async (req, res) => {
   try {
     const { chapterId } = req.params
@@ -166,40 +233,22 @@ router.post('/projects/:projectId/chapters/:chapterId/versions', async (req, res
       return res.status(400).json({ error: 'Content and passType required' })
     }
 
-    const id = nanoid()
-    const wordCount = content.split(/\s+/).filter((w: string) => w.length > 0).length
+    // Collapse legacy pass types into the 3 canonical stages so the editor only
+    // ever maintains one OUTLINE / one DRAFT / one FINAL row.
+    const stage = passType === 'STYLE' ? 'FINAL' : passType === 'MANUAL' ? (req.body.stage || 'DRAFT') : passType
+    const id = await upsertStageVersion(chapterId, content, stage)
+    const wordCount = countWords(content)
 
-    await db.insert(chapterVersions).values({
-      id,
-      chapterId,
-      content,
-      passType,
-      wordCount,
-      createdAt: new Date().toISOString(),
-    })
-
-    // Get chapter to find project
     const chapter = await db.select({ projectId: chapters.projectId }).from(chapters).where(eq(chapters.id, chapterId)).get()
-    
-    // Update chapter word count
-    await db
-      .update(chapters)
-      .set({ wordCount, updatedAt: new Date().toISOString() })
-      .where(eq(chapters.id, chapterId))
 
-    // Recalculate project total word count
-    if (chapter) {
-      const allChapters = await db.select({ wordCount: chapters.wordCount }).from(chapters).where(eq(chapters.projectId, chapter.projectId)).all()
-      const totalWords = allChapters.reduce((sum, ch) => sum + (ch.wordCount || 0), 0)
-      await db.update(projects).set({ currentWordCount: totalWords, updatedAt: new Date().toISOString() }).where(eq(projects.id, chapter.projectId))
+    // Only prose stages (draft/final) drive the chapter word count — an outline
+    // is short and must not clobber it.
+    if (stage === 'DRAFT' || stage === 'FINAL') {
+      await db.update(chapters).set({ wordCount, updatedAt: new Date().toISOString() }).where(eq(chapters.id, chapterId))
+      if (chapter) await recalcProjectWords(chapter.projectId)
     }
 
-    const result = await db
-      .select()
-      .from(chapterVersions)
-      .where(eq(chapterVersions.id, id))
-      .get()
-
+    const result = await db.select().from(chapterVersions).where(eq(chapterVersions.id, id)).get()
     res.json(result)
   } catch (error) {
     console.error('Error saving version:', error)

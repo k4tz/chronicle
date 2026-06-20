@@ -1,6 +1,6 @@
 // server/src/routes/chapter-generate.ts
-import { Router } from 'express'
-import { llmService } from '../services/llmService'
+import { Router, type Response } from 'express'
+import { llmService, stripThinkingTags } from '../services/llmService'
 import { contextAssemblyEngine } from '../services/contextAssemblyEngine'
 import { db, eq } from '../db'
 import { chapters, chapterVersions, styleProfiles, characters, locations, stateSnapshots, projects, characterStates, locationStates, generationLogs } from '../db/schema'
@@ -13,6 +13,7 @@ import { logGeneration, promptTokens } from '../services/generationLog'
 import { countTokens } from '../services/tokenizer'
 import { generationQueue, QueueJob } from '../services/generationQueue'
 import { onChapterFinalized } from '../services/arcPlannerService'
+import { upsertStageVersion, recalcProjectWords, countWords } from './chapters'
 
 const router = Router()
 
@@ -605,6 +606,240 @@ router.get('/projects/:projectId/chapters/:chapterId/generate/style', async (req
   }
 })
 
+// === Unified outline → draft → final pipeline (issues #7, #8, #9) ============
+//
+// One SSE endpoint generates a chapter up to a chosen `target` stage, running
+// every prerequisite stage in order and feeding each into the next (outline →
+// draft → final). `from` controls which stage to (re)generate: stages before
+// `from` are reused from the saved versions (regenerated only if missing). This
+// powers both "generate to Final in one go" and "regenerate just this stage
+// from its predecessor". Each stage upserts its single canonical version row.
+
+type PipelineStage = 'outline' | 'draft' | 'final'
+const STAGE_ORDER: PipelineStage[] = ['outline', 'draft', 'final']
+
+interface PipelineOpts {
+  wordCount?: number
+  tension?: number
+  focus?: string
+  styleProfileId?: string
+  characterIds?: string[]
+  locationIds?: string[]
+}
+
+type ChapterRow = typeof chapters.$inferSelect
+type ProjectRow = typeof projects.$inferSelect
+
+function sse(res: Response, payload: unknown): void {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`)
+}
+
+// Resolve a style profile id into a one-line summary (for outline/draft prompts)
+// and the parsed object (for the style pass). Falls back to neutral prose.
+async function resolveStyle(styleProfileId?: string | null): Promise<{ summary: string; json: string; parsed: any | null }> {
+  let parsed: any | null = null
+  if (styleProfileId) {
+    const profile = await db.select().from(styleProfiles).where(eq(styleProfiles.id, styleProfileId)).get()
+    if (profile?.extractedProfile) {
+      try { parsed = JSON.parse(profile.extractedProfile) } catch { parsed = null }
+    }
+  }
+  if (!parsed) return { summary: 'Neutral, balanced prose', json: 'Neutral, balanced prose', parsed: null }
+  const summary = `Sentence: ${parsed.sentenceLengthTendency}, Metaphors: ${parsed.metaphorDensity}, Vocabulary: ${parsed.vocabularyRegister}, Pacing: ${parsed.pacingRhythm}`
+  return { summary, json: JSON.stringify(parsed), parsed }
+}
+
+// Drive one LLM pass: stream chunks to `res` (tagged with the stage) when
+// streaming, otherwise collect non-streamed (queue jobs). Returns cleaned text.
+async function runPass(
+  res: Response | null,
+  stage: PipelineStage,
+  req: { systemPrompt: string; userPrompt: string; maxTokens: number; temperature: number },
+): Promise<string> {
+  let raw = ''
+  if (res) {
+    for await (const chunk of llmService.generate(req)) {
+      raw += chunk
+      sse(res, { type: 'chunk', stage, content: chunk })
+    }
+  } else {
+    raw = await llmService.complete(req)
+  }
+  return stripThinkingTags(raw).trim()
+}
+
+async function runOutline(res: Response | null, projectId: string, chapter: ChapterRow, project: ProjectRow, opts: PipelineOpts): Promise<string> {
+  const context = await contextAssemblyEngine.assembleContext(projectId, {
+    chapterId: chapter.id,
+    chapterNumber: chapter.number,
+    relevantCharacterIds: opts.characterIds || [],
+    relevantLocationIds: opts.locationIds || [],
+    queryText: [chapter.title, opts.focus, chapter.outline].filter(Boolean).join('\n'),
+  })
+  const style = await resolveStyle(opts.styleProfileId)
+  const system = loadPrompt('generation-system')
+  const prompt = substituteTemplate(loadPrompt('scene-outline'), {
+    chapterNumber: chapter.number.toString(),
+    chapterTitle: chapter.title || `Chapter ${chapter.number}`,
+    wordCount: (opts.wordCount ?? project.minWordCountPerChapter ?? 2000).toString(),
+    tension: (opts.tension ?? 5).toString(),
+    focus: opts.focus || 'Balanced',
+    styleProfile: style.summary,
+    context: context.tier1 + '\n' + context.tier2,
+  })
+  const started = Date.now()
+  const outline = await runPass(res, 'outline', { systemPrompt: system, userPrompt: prompt, maxTokens: 2000, temperature: 0.7 })
+  await logGeneration({ chapterId: chapter.id, passType: 'OUTLINE', tokensIn: promptTokens(system, prompt), tokensOut: countTokens(outline), durationMs: Date.now() - started })
+  await db.update(chapters).set({ outline, status: 'outline', updatedAt: new Date().toISOString() }).where(eq(chapters.id, chapter.id))
+  const versionId = await upsertStageVersion(chapter.id, outline, 'OUTLINE')
+  if (res) sse(res, { type: 'stage-complete', stage: 'outline', versionId, wordCount: countWords(outline) })
+  return outline
+}
+
+async function runDraft(res: Response | null, projectId: string, chapter: ChapterRow, project: ProjectRow, outline: string, opts: PipelineOpts): Promise<string> {
+  const context = await contextAssemblyEngine.assembleContext(projectId, {
+    chapterId: chapter.id,
+    chapterNumber: chapter.number,
+    relevantCharacterIds: opts.characterIds || [],
+    relevantLocationIds: opts.locationIds || [],
+    queryText: [chapter.title, outline].filter(Boolean).join('\n'),
+  })
+  const style = await resolveStyle(opts.styleProfileId)
+  const system = loadPrompt('generation-system')
+  const prompt = substituteTemplate(loadPrompt('chapter-draft'), {
+    chapterNumber: chapter.number.toString(),
+    chapterTitle: chapter.title || `Chapter ${chapter.number}`,
+    wordCount: (opts.wordCount ?? project.minWordCountPerChapter ?? chapter.wordCount ?? 2000).toString(),
+    pov: project.pov || 'third-limited',
+    outline,
+    context: context.tier1 + '\n' + context.tier2,
+    styleProfile: style.json,
+  })
+  const started = Date.now()
+  const draft = await runPass(res, 'draft', { systemPrompt: system, userPrompt: prompt, maxTokens: 4000, temperature: 0.8 })
+  await logGeneration({ chapterId: chapter.id, passType: 'DRAFT', tokensIn: promptTokens(system, prompt), tokensOut: countTokens(draft), durationMs: Date.now() - started })
+  const versionId = await upsertStageVersion(chapter.id, draft, 'DRAFT')
+  await db.update(chapters).set({ wordCount: countWords(draft), status: 'draft', updatedAt: new Date().toISOString() }).where(eq(chapters.id, chapter.id))
+  await recalcProjectWords(projectId)
+  if (res) sse(res, { type: 'stage-complete', stage: 'draft', versionId, wordCount: countWords(draft) })
+  return draft
+}
+
+async function runFinal(res: Response | null, projectId: string, chapter: ChapterRow, draft: string, opts: PipelineOpts): Promise<string> {
+  const style = await resolveStyle(opts.styleProfileId ?? chapter.styleProfileId)
+  let final = draft
+  if (style.parsed) {
+    const p = style.parsed
+    const system = loadPrompt('generation-system')
+    const prompt = substituteTemplate(loadPrompt('style-pass'), {
+      sentenceLength: p.sentenceLengthTendency,
+      metaphorDensity: p.metaphorDensity,
+      vocabulary: p.vocabularyRegister,
+      pacing: p.pacingRhythm,
+      dialogueRatio: (p.dialogueToNarrationRatio ?? 0.3).toString(),
+      descriptionDensity: p.descriptionDensity,
+      povIntimacy: p.povIntimacy,
+      internalMonologue: p.internalMonologue,
+      notes: p.notes || '',
+      draft,
+    })
+    const started = Date.now()
+    const styled = await runPass(res, 'final', { systemPrompt: system, userPrompt: prompt, maxTokens: 4000, temperature: 0.7 })
+    await logGeneration({ chapterId: chapter.id, passType: 'STYLE', tokensIn: promptTokens(system, prompt), tokensOut: countTokens(styled), durationMs: Date.now() - started })
+    if (styled.trim()) final = styled
+  } else if (res) {
+    // No style profile → the draft is promoted to Final as-is. Emit it so the
+    // editor displays the final content for this stage.
+    sse(res, { type: 'chunk', stage: 'final', content: draft })
+  }
+  const versionId = await upsertStageVersion(chapter.id, final, 'FINAL')
+  await db.update(chapters).set({ wordCount: countWords(final), status: 'final', updatedAt: new Date().toISOString() }).where(eq(chapters.id, chapter.id))
+  await recalcProjectWords(projectId)
+  if (res) sse(res, { type: 'stage-complete', stage: 'final', versionId, wordCount: countWords(final) })
+  return final
+}
+
+// Latest content for a stage from the chapter's saved versions.
+function latestStageContent(versions: Array<typeof chapterVersions.$inferSelect>, passType: string): string {
+  return versions
+    .filter(v => v.passType === passType)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .pop()?.content || ''
+}
+
+// Run the pipeline up to `target`, (re)generating from `from` (stages before it
+// are reused unless missing). Streams when `res` is provided. Returns the final
+// content of the target stage.
+async function runPipeline(
+  res: Response | null,
+  projectId: string,
+  chapter: ChapterRow,
+  project: ProjectRow,
+  target: PipelineStage,
+  from: PipelineStage | null,
+  opts: PipelineOpts,
+): Promise<string> {
+  const versions = await db.select().from(chapterVersions).where(eq(chapterVersions.chapterId, chapter.id)).all()
+  let outline = latestStageContent(versions, 'OUTLINE') || chapter.outline || ''
+  let draft = latestStageContent(versions, 'DRAFT')
+  let final = latestStageContent(versions, 'FINAL') || latestStageContent(versions, 'STYLE')
+
+  const tIdx = STAGE_ORDER.indexOf(target)
+  const fIdx = from ? STAGE_ORDER.indexOf(from) : 0
+
+  for (let i = 0; i <= tIdx; i++) {
+    const stage = STAGE_ORDER[i]
+    const has = stage === 'outline' ? !!outline.trim() : stage === 'draft' ? !!draft.trim() : !!final.trim()
+    const regen = i >= fIdx || !has
+    if (!regen) { if (res) sse(res, { type: 'reused', stage }); continue }
+    if (res) sse(res, { type: 'stage-start', stage })
+    if (stage === 'outline') outline = await runOutline(res, projectId, chapter, project, opts)
+    else if (stage === 'draft') draft = await runDraft(res, projectId, chapter, project, outline, opts)
+    else final = await runFinal(res, projectId, chapter, draft, opts)
+  }
+
+  return target === 'outline' ? outline : target === 'draft' ? draft : final
+}
+
+function parseStage(v: unknown): PipelineStage | null {
+  return v === 'outline' || v === 'draft' || v === 'final' ? v : null
+}
+
+// GET .../generate/pipeline?target=&from=&styleProfileId=&wordCount=&tension=&focus=&charIds=&locIds=
+router.get('/projects/:projectId/chapters/:chapterId/generate/pipeline', async (req, res) => {
+  try {
+    const { projectId, chapterId } = req.params
+    const q = req.query
+    const target = parseStage(q.target) ?? 'final'
+    const from = parseStage(q.from)
+
+    const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
+    if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
+    const project = await db.select().from(projects).where(eq(projects.id, projectId)).get()
+    if (!project) return res.status(404).json({ error: 'Project not found' })
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Connection', 'keep-alive')
+
+    const opts: PipelineOpts = {
+      wordCount: q.wordCount ? parseInt(q.wordCount as string) : undefined,
+      tension: q.tension ? parseInt(q.tension as string) : undefined,
+      focus: (q.focus as string) || undefined,
+      styleProfileId: (q.styleProfileId as string) || chapter.styleProfileId || undefined,
+      characterIds: q.charIds ? (q.charIds as string).split(',').filter(Boolean) : [],
+      locationIds: q.locIds ? (q.locIds as string).split(',').filter(Boolean) : [],
+    }
+
+    const content = await runPipeline(res, projectId, chapter, project, target, from, opts)
+    sse(res, { type: 'complete', stage: target, content })
+    res.end()
+  } catch (error) {
+    console.error('Error running generation pipeline:', error)
+    try { sse(res, { type: 'error', message: 'Generation failed' }); res.end() } catch { /* already closed */ }
+  }
+})
+
 // POST /projects/:projectId/chapters/:chapterId/generate/check - Check continuity
 router.post('/projects/:projectId/chapters/:chapterId/generate/check', async (req, res) => {
   try {
@@ -755,17 +990,11 @@ router.post('/projects/:projectId/chapters/:chapterId/analyze', async (req, res)
   }
 })
 
+// Persist a generation pass. Upserts the single row for the stage (STYLE counts
+// as FINAL) so streaming checkpoints and re-generation never pile up rows.
 async function saveCheckpoint(chapterId: string, content: string, passType: string): Promise<string> {
-  const versionId = nanoid()
-  await db.insert(chapterVersions).values({
-    id: versionId,
-    chapterId,
-    content,
-    passType,
-    wordCount: content.split(/\s+/).filter(w => w.length > 0).length,
-    createdAt: new Date().toISOString(),
-  })
-  return versionId
+  const stage = passType === 'STYLE' ? 'FINAL' : passType
+  return upsertStageVersion(chapterId, content, stage)
 }
 
 // POST /projects/:projectId/chapters/:chapterId/finalize - Finalize chapter with snapshot
@@ -898,66 +1127,17 @@ async function processChapterJob(job: QueueJob): Promise<void> {
   const project = await db.select().from(projects).where(eq(projects.id, projectId)).get()
   if (!project) throw new Error('Project not found')
 
-  const styleProfileId: string | undefined = options.styleProfileId
-  let styleProfile = 'Neutral, balanced prose'
-  let styleProfileJson = styleProfile
-  if (styleProfileId) {
-    const profile = await db.select().from(styleProfiles).where(eq(styleProfiles.id, styleProfileId)).get()
-    if (profile?.extractedProfile) {
-      const parsed = JSON.parse(profile.extractedProfile)
-      styleProfile = `Sentence: ${parsed.sentenceLengthTendency}, Metaphors: ${parsed.metaphorDensity}, Vocabulary: ${parsed.vocabularyRegister}, Pacing: ${parsed.pacingRhythm}`
-      styleProfileJson = JSON.stringify(parsed)
-    }
-  }
-
-  // 1) Outline (skip if the chapter already has one)
-  let outline = chapter.outline || ''
-  if (!outline.trim()) {
-    const ctx = await contextAssemblyEngine.assembleContext(projectId, {
-      chapterId, chapterNumber: chapter.number,
-      relevantCharacterIds: options.characterIds || [],
-      relevantLocationIds: options.locationIds || [],
-      queryText: [chapter.title, options.focus, chapter.outline].filter(Boolean).join('\n'),
-    })
-    const outlineSystem = loadPrompt('generation-system')
-    const outlinePrompt = substituteTemplate(loadPrompt('scene-outline'), {
-      chapterNumber: chapter.number.toString(),
-      chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      wordCount: (options.wordCount ?? project.minWordCountPerChapter ?? 2000).toString(),
-      tension: (options.tension ?? 5).toString(),
-      focus: options.focus || 'Balanced',
-      styleProfile,
-      context: ctx.tier1 + '\n' + ctx.tier2,
-    })
-    const started = Date.now()
-    outline = await llmService.complete({ systemPrompt: outlineSystem, userPrompt: outlinePrompt, maxTokens: 2000, temperature: 0.7 })
-    await logGeneration({ chapterId, passType: 'OUTLINE', tokensIn: promptTokens(outlineSystem, outlinePrompt), tokensOut: countTokens(outline), durationMs: Date.now() - started })
-    await db.update(chapters).set({ outline, updatedAt: new Date().toISOString() }).where(eq(chapters.id, chapterId))
-    await saveCheckpoint(chapterId, outline, 'OUTLINE')
-  }
-
-  // 2) Draft
-  const ctx = await contextAssemblyEngine.assembleContext(projectId, {
-    chapterId, chapterNumber: chapter.number,
-    queryText: [chapter.title, outline].filter(Boolean).join('\n'),
+  // Background (non-streaming) run up to the requested target. The outer-menu
+  // "generate to Draft / Final" enqueues with options.target. Defaults to draft.
+  const target = parseStage(options.target) ?? 'draft'
+  await runPipeline(null, projectId, chapter, project, target, 'outline', {
+    wordCount: options.wordCount,
+    tension: options.tension,
+    focus: options.focus,
+    styleProfileId: options.styleProfileId ?? chapter.styleProfileId ?? undefined,
+    characterIds: options.characterIds,
+    locationIds: options.locationIds,
   })
-  const draftSystem = loadPrompt('generation-system')
-  const draftPrompt = substituteTemplate(loadPrompt('chapter-draft'), {
-    chapterNumber: chapter.number.toString(),
-    chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-    wordCount: (options.wordCount ?? chapter.wordCount ?? 2000).toString(),
-    pov: project.pov || 'third-limited',
-    outline,
-    context: ctx.tier1 + '\n' + ctx.tier2,
-    styleProfile: styleProfileJson,
-  })
-  const draftStart = Date.now()
-  const draft = await llmService.complete({ systemPrompt: draftSystem, userPrompt: draftPrompt, maxTokens: 4000, temperature: 0.8 })
-  await logGeneration({ chapterId, passType: 'DRAFT', tokensIn: promptTokens(draftSystem, draftPrompt), tokensOut: countTokens(draft), durationMs: Date.now() - draftStart })
-  await saveCheckpoint(chapterId, draft, 'DRAFT')
-  await db.update(chapters)
-    .set({ wordCount: draft.split(/\s+/).filter(w => w.length > 0).length, status: 'draft', updatedAt: new Date().toISOString() })
-    .where(eq(chapters.id, chapterId))
 }
 
 generationQueue.setProcessor(processChapterJob)
