@@ -6,11 +6,12 @@
 // chapter outline/focus + recent canon), rank candidate entities and select the
 // most relevant top-k within budget.
 //
-// Default backend is a dependency-free lexical scorer (TF-IDF cosine) so it
-// works offline and deterministically. An embedding-backed path is available
-// behind EMBEDDINGS_ENABLED for when llama.cpp is serving an embedding model.
+// Default backend is local HuggingFace embeddings (transformers.js, BGE-small)
+// for semantic relevance. It falls back to a dependency-free lexical scorer
+// (TF-IDF cosine) when embeddings are disabled or unavailable, so retrieval
+// always returns a sensible ranking even offline / before the model downloads.
 
-import { llmService } from './llmService'
+import { embed as hfEmbed } from './embeddingService'
 
 const STOPWORDS = new Set([
   'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'any', 'can', 'had', 'her', 'was', 'one',
@@ -100,18 +101,23 @@ function cosineVec(a: number[], b: number[]): number {
   return na === 0 || nb === 0 ? 0 : dotp / (Math.sqrt(na) * Math.sqrt(nb))
 }
 
-/** Embedding-backed ranking (one /v1/embeddings call for query + all docs). */
+// Embedding-backed ranking via local HuggingFace embeddings. The query gets the
+// BGE query instruction; documents are embedded plain. Both pass through the
+// persistent vector cache, so only the (new) query is embedded each generation.
 export async function rankByEmbedding<T>(query: string, candidates: Candidate<T>[]): Promise<Scored<T>[]> {
   if (candidates.length === 0) return []
-  const vectors = await llmService.embed([query, ...candidates.map((c) => c.text)])
-  const q = vectors[0]
+  const [q] = await hfEmbed([query], { query: true })
+  const docVectors = await hfEmbed(candidates.map((c) => c.text))
   return candidates
-    .map((c, i) => ({ item: c.item, score: cosineVec(q, vectors[i + 1]) }))
+    .map((c, i) => ({ item: c.item, score: cosineVec(q, docVectors[i]) }))
     .sort((a, b) => b.score - a.score)
 }
 
+// Enabled by default now that embeddings run locally with no token/network at
+// inference. Set EMBEDDINGS_ENABLED=0 (or false) to force the lexical scorer.
 export function embeddingsEnabled(): boolean {
-  return process.env.EMBEDDINGS_ENABLED === '1' || process.env.EMBEDDINGS_ENABLED === 'true'
+  const v = process.env.EMBEDDINGS_ENABLED
+  return v !== '0' && v !== 'false'
 }
 
 /**
