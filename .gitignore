@@ -18,6 +18,7 @@ build/
 *.sqlite3
 server/dev.db
 server/src/db/migrations/
+server/drizzle.config.ts
 
 # Logs
 *.log
