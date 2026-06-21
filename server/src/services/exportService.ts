@@ -2,6 +2,9 @@
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx'
 import { db, eq } from '../db'
 import { projects, chapters, chapterVersions, characters as charactersSchema, locations as locationsSchema, loreEntries, storyArcs, plotThreads, worldFoundations } from '../db/schema'
+// Export should publish the FINAL prose (falling back to draft), not whatever
+// stage was written most recently.
+import { pickBestVersion } from './versionService'
 
 export interface ExportOptions {
   includeFrontMatter: boolean
@@ -74,7 +77,7 @@ export class ExportService {
         .orderBy(chapterVersions.createdAt)
         .all()
 
-      const latestVersion = versions[versions.length - 1]
+      const latestVersion = pickBestVersion(versions)
       if (!latestVersion) continue
 
       // Chapter title
@@ -291,7 +294,7 @@ export class ExportService {
         .orderBy(chapterVersions.createdAt)
         .all()
 
-      const latestVersion = versions[versions.length - 1]
+      const latestVersion = pickBestVersion(versions)
       if (!latestVersion) continue
 
       content += `\n\n${chapter.title || `Chapter ${chapter.number}`}\n`

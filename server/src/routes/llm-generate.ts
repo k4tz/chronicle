@@ -1,11 +1,10 @@
 // server/src/routes/llm-generate.ts
 import { Router } from 'express'
-import * as fs from 'fs'
-import * as path from 'path'
 import { llmService } from '../services/llmService'
 import type { GenerationRequest } from '../types/services'
 import { JsonSchema, WORLD_SCHEMA, CHARACTER_SCHEMA, LOCATION_SCHEMA, LORE_SCHEMA } from '../services/schemas'
 import { ideasService } from '../services/ideasService'
+import { loadPrompt, substituteTemplate } from '../services/promptTemplate'
 import { db, eq } from '../db'
 import { worldFoundations, characters, locations, loreEntries } from '../db/schema'
 import { nanoid } from 'nanoid'
@@ -379,19 +378,5 @@ router.post('/projects/:projectId/generate/lore', async (req, res) => {
     res.status(500).json({ error: 'Failed to generate lore', details: errorMsg })
   }
 })
-
-// Load the prompt template for lore generation; kept module-level so it errors
-// loudly at first use if the file is missing rather than silently degrading.
-function loadPrompt(name: string): string {
-  return fs.readFileSync(path.join(__dirname, '../prompts', `${name}.md`), 'utf-8')
-}
-
-function substituteTemplate(template: string, vars: Record<string, string>): string {
-  let result = template
-  for (const [key, value] of Object.entries(vars)) {
-    result = result.replace(new RegExp(`{{${key}}}`, 'g'), value ?? '')
-  }
-  return result
-}
 
 export const app = router

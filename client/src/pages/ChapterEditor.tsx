@@ -31,6 +31,7 @@ export default function ChapterEditorPage() {
 
   const [content, setContent] = useState('')
   const [saving, setSaving] = useState(false)
+  const [finalizing, setFinalizing] = useState(false)
   // Autosave: debounced background save so navigating away never loses work.
   const [autoStatus, setAutoStatus] = useState<'idle' | 'unsaved' | 'saving' | 'saved' | 'error'>('idle')
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null)
@@ -114,18 +115,34 @@ export default function ChapterEditorPage() {
       setCharacters(chars)
       setLocations(locs)
 
-      // Initialize snapshot form with existing data or defaults
+      // Initialize snapshot form with existing data or defaults. AI-finalized
+      // snapshots key states by characterName/locationName (no id), so resolve
+      // names → ids here; manually-saved snapshots already carry the id.
       if (chapterData.snapshot) {
+        const charById = new Map(chars.map((c: Character) => [c.name.toLowerCase(), c.id]))
+        const locById = new Map(locs.map((l: Location) => [l.name.toLowerCase(), l.id]))
+
         const cs: Record<string, CharacterState> = {}
-        chapterData.snapshot.characterStates.forEach((s: CharacterState) => { cs[s.charId] = s })
+        chapterData.snapshot.characterStates.forEach((s: CharacterState & { characterName?: string }) => {
+          const id = s.charId || charById.get(String(s.characterName || '').toLowerCase())
+          if (!id) return
+          cs[id] = { charId: id, location: s.location || '', condition: s.condition || 'normal', emotionalState: s.emotionalState || '', activeGoals: s.activeGoals || [], newKnowledge: s.newKnowledge || [] }
+        })
         setCharStates(cs)
 
         const ls: Record<string, LocationState> = {}
-        chapterData.snapshot.locationStates.forEach((s: LocationState) => { ls[s.locationId] = s })
+        chapterData.snapshot.locationStates.forEach((s: LocationState & { locationName?: string }) => {
+          const id = s.locationId || locById.get(String(s.locationName || '').toLowerCase())
+          if (!id) return
+          ls[id] = { locationId: id, currentOccupants: s.currentOccupants || [], condition: s.condition || '', activeEvents: s.activeEvents || [] }
+        })
         setLocStates(ls)
 
         const ts: Record<string, OpenThread> = {}
-        chapterData.snapshot.openThreads.forEach((s: OpenThread) => { ts[s.threadId] = s })
+        chapterData.snapshot.openThreads.forEach((s: OpenThread) => {
+          const id = s.threadId || `ai:${s.name}`
+          ts[id] = { threadId: id, name: s.name, urgency: (s.urgency as 1 | 2 | 3) || 2, lastDevelopment: s.lastDevelopment || '' }
+        })
         setThreadStates(ts)
 
         setNewCanonFacts(chapterData.snapshot.newCanonFacts.join('\n'))
@@ -208,6 +225,27 @@ export default function ChapterEditorPage() {
       setAutoStatus('error')
     } finally {
       setSaving(false)
+    }
+  }
+
+  // Finalize: extract the state snapshot, evolve the Knowledge Bank with the
+  // confident updates, and advance arc plot points. (This is the post-chapter
+  // hook that the Arc Planner relies on — previously unreachable from the UI.)
+  const handleFinalize = async () => {
+    if (!projectId || !chapterId) return
+    setFinalizing(true)
+    showToast('Finalizing — analysing the chapter…')
+    try {
+      const res = await generationApi.finalizeChapter(projectId, chapterId, characters.map(c => c.id), locations.map(l => l.id))
+      const kb = res.kbEvolution ? ` · ${res.kbEvolution.applied} KB update${res.kbEvolution.applied === 1 ? '' : 's'}` : ''
+      const arc = res.arcPlanner?.advisory ? ` · ${res.arcPlanner.advisory}` : ''
+      showToast(`Finalized (~${res.confidence ?? 0}% confidence)${kb}${arc}`)
+      loadAllData(currentStage)
+    } catch (error) {
+      console.error('Finalize failed:', error)
+      showToast('Finalize failed — is the model server reachable?')
+    } finally {
+      setFinalizing(false)
     }
   }
 
@@ -417,6 +455,14 @@ export default function ChapterEditorPage() {
             title={`Save the ${currentStage.toLowerCase()} version`}
           >
             {saving ? 'Saving...' : `Save ${currentStage.charAt(0) + currentStage.slice(1).toLowerCase()}`}
+          </button>
+          <button
+            onClick={handleFinalize}
+            disabled={finalizing}
+            className="px-4 py-2 bg-green-700 text-white rounded hover:bg-green-800 disabled:opacity-50"
+            title="Extract the state snapshot, evolve the Knowledge Bank, and advance arc plot points"
+          >
+            {finalizing ? 'Finalizing…' : '✅ Finalize'}
           </button>
         </div>
       </div>

@@ -820,42 +820,21 @@ export interface QueueJob {
 }
 
 export const generationApi = {
-  async generateOutline(projectId: string, chapterId: string, options: {
-    wordCount?: number
-    tension?: number
-    focus?: string
-    styleProfileId?: string
-    characterIds?: string[]
-    locationIds?: string[]
-  }): Promise<{ success: boolean; outline: string; versionId: string }> {
-    const response = await apiClient.post(`/projects/${projectId}/chapters/${chapterId}/generate/outline`, options)
-    return response.data
-  },
-
-  // Streaming (SSE) outline (D2) — preferred over the POST form so it's not a spinner.
-  async streamOutline(projectId: string, chapterId: string, options: {
-    wordCount?: number; tension?: number; focus?: string; styleProfileId?: string
-    characterIds?: string[]; locationIds?: string[]
-  }): Promise<ReadableStream<Uint8Array>> {
-    const params = new URLSearchParams()
-    if (options.wordCount != null) params.set('wordCount', String(options.wordCount))
-    if (options.tension != null) params.set('tension', String(options.tension))
-    if (options.focus) params.set('focus', options.focus)
-    if (options.styleProfileId) params.set('styleProfileId', options.styleProfileId)
-    if (options.characterIds?.length) params.set('charIds', options.characterIds.join(','))
-    if (options.locationIds?.length) params.set('locIds', options.locationIds.join(','))
-    const url = `${API_BASE_URL}/projects/${projectId}/chapters/${chapterId}/generate/outline?${params}`
-    const response = await fetch(url, { method: 'GET', headers: { 'Content-Type': 'text/event-stream' } })
-    if (!response.ok || !response.body) {
-      const detail = await response.text().catch(() => '')
-      throw new Error(`Outline generation failed (${response.status}). ${detail}`)
-    }
-    return response.body
-  },
-
   // Auto-infer snapshot + KB updates + confidence in one call, without persisting (B1).
   async analyzeChapter(projectId: string, chapterId: string, content?: string, characterIds?: string[], locationIds?: string[]): Promise<{ success: boolean; analysis: ChapterAnalysis }> {
     const response = await apiClient.post(`/projects/${projectId}/chapters/${chapterId}/analyze`, { content, characterIds, locationIds })
+    return response.data
+  },
+
+  // Finalize: persist the inferred snapshot, evolve the Knowledge Bank with the
+  // confident updates, and advance arc plot points (the post-chapter hook).
+  async finalizeChapter(projectId: string, chapterId: string, characterIds?: string[], locationIds?: string[]): Promise<{
+    success: boolean
+    confidence: number
+    kbEvolution: { updatesFound: number; applied: number; skipped: number } | null
+    arcPlanner: { advisory: string | null; plotPointsCompleted: number; subArcComplete: boolean } | null
+  }> {
+    const response = await apiClient.post(`/projects/${projectId}/chapters/${chapterId}/finalize`, { characterIds, locationIds })
     return response.data
   },
 
@@ -897,32 +876,6 @@ export const generationApi = {
     if (!response.ok || !response.body) {
       const detail = await response.text().catch(() => '')
       throw new Error(`Generation failed (${response.status}). ${detail}`)
-    }
-    return response.body
-  },
-
-  async generateDraft(projectId: string, chapterId: string, styleProfileId?: string): Promise<ReadableStream<Uint8Array>> {
-    const url = `${API_BASE_URL}/projects/${projectId}/chapters/${chapterId}/generate/draft${styleProfileId ? `?styleProfileId=${styleProfileId}` : ''}`
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { 'Content-Type': 'text/event-stream' },
-    })
-    if (!response.ok || !response.body) {
-      const detail = await response.text().catch(() => '')
-      throw new Error(`Draft generation failed (${response.status}). ${detail}`)
-    }
-    return response.body
-  },
-
-  async generateStylePass(projectId: string, chapterId: string, styleProfileId: string): Promise<ReadableStream<Uint8Array>> {
-    const url = `${API_BASE_URL}/projects/${projectId}/chapters/${chapterId}/generate/style?styleProfileId=${styleProfileId}`
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { 'Content-Type': 'text/event-stream' },
-    })
-    if (!response.ok || !response.body) {
-      const detail = await response.text().catch(() => '')
-      throw new Error(`Style pass failed (${response.status}). ${detail}`)
     }
     return response.body
   },

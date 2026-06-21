@@ -2,11 +2,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { locationsApi, Location } from '../api/api'
-
-function errorDetail(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { details?: string; error?: string } } }
-  return e?.response?.data?.details || e?.response?.data?.error || fallback
-}
+import { errorDetail } from '../utils/errors'
 
 export default function LocationsPage() {
   const { projectId } = useParams<{ projectId: string }>()

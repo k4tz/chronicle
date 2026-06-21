@@ -6,31 +6,15 @@ import { db, eq } from '../db'
 import { chapters, chapterVersions, styleProfiles, characters, locations, stateSnapshots, projects, characterStates, locationStates, generationLogs } from '../db/schema'
 import { inArray } from 'drizzle-orm'
 import { nanoid } from 'nanoid'
-import * as fs from 'fs'
-import * as path from 'path'
 import { SNAPSHOT_SCHEMA, CHAPTER_ANALYSIS_SCHEMA, CONTINUITY_ISSUES_SCHEMA, ENTITY_EXTRACTION_SCHEMA } from '../services/schemas'
 import { logGeneration, promptTokens } from '../services/generationLog'
 import { countTokens } from '../services/tokenizer'
 import { generationQueue, QueueJob } from '../services/generationQueue'
 import { onChapterFinalized } from '../services/arcPlannerService'
-import { upsertStageVersion, recalcProjectWords, countWords } from './chapters'
+import { upsertStageVersion, recalcProjectWords, countWords, pickBestVersion } from '../services/versionService'
+import { loadPrompt, substituteTemplate } from '../services/promptTemplate'
 
 const router = Router()
-
-const PROMPTS_DIR = path.join(__dirname, '../prompts')
-
-function loadPrompt(name: string): string {
-  const filepath = path.join(PROMPTS_DIR, `${name}.md`)
-  return fs.readFileSync(filepath, 'utf-8')
-}
-
-function substituteTemplate(template: string, vars: Record<string, string>): string {
-  let result = template
-  for (const [key, value] of Object.entries(vars)) {
-    result = result.replace(new RegExp(`{{${key}}}`, 'g'), value)
-  }
-  return result
-}
 
 // Snapshot generation is shared by the /generate/snapshot, /analyze and /finalize endpoints.
 const SNAPSHOT_SYSTEM_PROMPT =
@@ -86,7 +70,6 @@ async function buildSnapshotPrompt(
   return substituteTemplate(loadPrompt('snapshot-assist'), {
     chapterNumber: chapter.number.toString(),
     chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-    chapter: '',
     prevWorldChanges: prevSnapshot ? JSON.parse(prevSnapshot.worldChanges || '[]').join('; ') : 'None yet',
     prevCanonFacts: prevSnapshot ? JSON.parse(prevSnapshot.newCanonFacts || '[]').join('; ') : 'None yet',
     characters: charNames || 'All characters in project',
@@ -253,358 +236,6 @@ async function persistRelationalStates(
   }
 }
 
-// POST /projects/:projectId/chapters/:chapterId/generate/outline - Generate scene outline
-router.post('/projects/:projectId/chapters/:chapterId/generate/outline', async (req, res) => {
-  try {
-    const { projectId, chapterId } = req.params
-    const { wordCount, tension, focus, styleProfileId } = req.body
-
-    // Get chapter and context
-    const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
-    if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
-    
-    // Get project settings for default word count
-    const project = await db.select().from(projects).where(eq(projects.id, projectId)).get()
-    if (!project) return res.status(404).json({ error: 'Project not found' })
-    
-    // Use provided wordCount, or project default, or fallback to 2000
-    const targetWordCount = wordCount ?? project.minWordCountPerChapter ?? 2000
-
-    const context = await contextAssemblyEngine.assembleContext(projectId, {
-      chapterId,
-      chapterNumber: chapter.number,
-      relevantCharacterIds: req.body.characterIds || [],
-      relevantLocationIds: req.body.locationIds || [],
-      queryText: [chapter.title, focus, chapter.outline].filter(Boolean).join('\n'),
-    })
-
-    // Get style profile
-    let styleProfile = 'Neutral, balanced prose'
-    if (styleProfileId && typeof styleProfileId === 'string') {
-      const profile = await db.select().from(styleProfiles).where(eq(styleProfiles.id, styleProfileId)).get()
-      if (profile?.extractedProfile) {
-        const parsed = JSON.parse(profile.extractedProfile)
-        styleProfile = `Sentence: ${parsed.sentenceLengthTendency}, Metaphors: ${parsed.metaphorDensity}, Vocabulary: ${parsed.vocabularyRegister}, Pacing: ${parsed.pacingRhythm}`
-      }
-    }
-
-    // Load and render template
-    const template = loadPrompt('scene-outline')
-    const prompt = substituteTemplate(template, {
-      chapterNumber: chapter.number.toString(),
-      chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      wordCount: targetWordCount.toString(),
-      tension: tension?.toString() || '5',
-      focus: focus || 'Balanced',
-      styleProfile,
-      context: context.tier1 + '\n' + context.tier2,
-    })
-
-    // Generate outline
-    const outlineSystem = loadPrompt('generation-system')
-    const outlineStart = Date.now()
-    const response = await llmService.complete({
-      systemPrompt: outlineSystem,
-      userPrompt: prompt,
-      maxTokens: 2000,
-      temperature: 0.7,
-    })
-    await logGeneration({
-      chapterId, passType: 'OUTLINE',
-      tokensIn: promptTokens(outlineSystem, prompt),
-      tokensOut: countTokens(response),
-      durationMs: Date.now() - outlineStart,
-    })
-
-    // Save outline to chapter
-    await db.update(chapters)
-      .set({ outline: response, updatedAt: new Date().toISOString() })
-      .where(eq(chapters.id, chapterId))
-
-    // Save as version
-    const versionId = nanoid()
-    await db.insert(chapterVersions).values({
-      id: versionId,
-      chapterId,
-      content: response,
-      passType: 'OUTLINE',
-      wordCount: response.split(/\s+/).filter(w => w.length > 0).length,
-      createdAt: new Date().toISOString(),
-    })
-
-    res.json({ success: true, outline: response, versionId })
-  } catch (error) {
-    console.error('Error generating outline:', error)
-    res.status(500).json({ error: 'Failed to generate outline' })
-  }
-})
-
-// GET /projects/:projectId/chapters/:chapterId/generate/outline - Stream the outline (D2)
-// SSE variant of the POST endpoint above so the outline pass isn't a multi-minute
-// spinner. Same persistence; emits chunk/complete/error events like draft.
-router.get('/projects/:projectId/chapters/:chapterId/generate/outline', async (req, res) => {
-  try {
-    const { projectId, chapterId } = req.params
-    const { wordCount, tension, focus, styleProfileId, charIds, locIds } = req.query
-
-    const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
-    if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
-    const project = await db.select().from(projects).where(eq(projects.id, projectId)).get()
-    if (!project) return res.status(404).json({ error: 'Project not found' })
-
-    res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
-    res.setHeader('Connection', 'keep-alive')
-
-    const targetWordCount = (wordCount ? parseInt(wordCount as string) : null) ?? project.minWordCountPerChapter ?? 2000
-    const focusStr = (focus as string) || 'Balanced'
-
-    const context = await contextAssemblyEngine.assembleContext(projectId, {
-      chapterId,
-      chapterNumber: chapter.number,
-      relevantCharacterIds: charIds ? (charIds as string).split(',') : [],
-      relevantLocationIds: locIds ? (locIds as string).split(',') : [],
-      queryText: [chapter.title, focusStr, chapter.outline].filter(Boolean).join('\n'),
-    })
-
-    let styleProfile = 'Neutral, balanced prose'
-    if (styleProfileId && typeof styleProfileId === 'string') {
-      const profile = await db.select().from(styleProfiles).where(eq(styleProfiles.id, styleProfileId)).get()
-      if (profile?.extractedProfile) {
-        const parsed = JSON.parse(profile.extractedProfile)
-        styleProfile = `Sentence: ${parsed.sentenceLengthTendency}, Metaphors: ${parsed.metaphorDensity}, Vocabulary: ${parsed.vocabularyRegister}, Pacing: ${parsed.pacingRhythm}`
-      }
-    }
-
-    const prompt = substituteTemplate(loadPrompt('scene-outline'), {
-      chapterNumber: chapter.number.toString(),
-      chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      wordCount: targetWordCount.toString(),
-      tension: tension?.toString() || '5',
-      focus: focusStr,
-      styleProfile,
-      context: context.tier1 + '\n' + context.tier2,
-    })
-
-    const outlineSystem = loadPrompt('generation-system')
-    const started = Date.now()
-    let fullContent = ''
-    for await (const chunk of llmService.generate({
-      systemPrompt: outlineSystem,
-      userPrompt: prompt,
-      maxTokens: 2000,
-      temperature: 0.7,
-    })) {
-      fullContent += chunk
-      res.write(`data: ${JSON.stringify({ type: 'chunk', content: chunk })}\n\n`)
-    }
-
-    await logGeneration({
-      chapterId, passType: 'OUTLINE',
-      tokensIn: promptTokens(outlineSystem, prompt),
-      tokensOut: countTokens(fullContent),
-      durationMs: Date.now() - started,
-    })
-
-    await db.update(chapters)
-      .set({ outline: fullContent, updatedAt: new Date().toISOString() })
-      .where(eq(chapters.id, chapterId))
-    const versionId = await saveCheckpoint(chapterId, fullContent, 'OUTLINE')
-
-    res.write(`data: ${JSON.stringify({ type: 'complete', versionId, outline: fullContent })}\n\n`)
-    res.end()
-  } catch (error) {
-    console.error('Error streaming outline:', error)
-    res.write(`data: ${JSON.stringify({ type: 'error', message: 'Outline generation failed' })}\n\n`)
-    res.end()
-  }
-})
-
-// GET /projects/:projectId/chapters/:chapterId/generate/draft - Stream draft generation
-router.get('/projects/:projectId/chapters/:chapterId/generate/draft', async (req, res) => {
-  try {
-    const { projectId, chapterId } = req.params
-    const { styleProfileId } = req.query
-
-    const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
-    if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
-    if (!chapter.outline) return res.status(400).json({ error: 'Chapter outline required' })
-
-    const project = await db.select().from(projects).where(eq(projects.id, projectId)).get()
-
-    // Set up SSE
-    res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
-    res.setHeader('Connection', 'keep-alive')
-
-    const context = await contextAssemblyEngine.assembleContext(projectId, {
-      chapterId,
-      chapterNumber: chapter.number,
-      queryText: [chapter.title, chapter.outline].filter(Boolean).join('\n'),
-    })
-
-    let styleProfile = 'Neutral, balanced prose'
-    if (styleProfileId && typeof styleProfileId === 'string') {
-      const profile = await db.select().from(styleProfiles).where(eq(styleProfiles.id, styleProfileId)).get()
-      if (profile?.extractedProfile) {
-        const parsed = JSON.parse(profile.extractedProfile)
-        styleProfile = JSON.stringify(parsed)
-      }
-    }
-
-    const template = loadPrompt('chapter-draft')
-    const prompt = substituteTemplate(template, {
-      chapterNumber: chapter.number.toString(),
-      chapterTitle: chapter.title || `Chapter ${chapter.number}`,
-      wordCount: (chapter.wordCount || 2000).toString(),
-      pov: project?.pov || 'third-limited',
-      outline: chapter.outline,
-      context: context.tier1 + '\n' + context.tier2,
-      styleProfile,
-    })
-
-    let fullContent = ''
-    let tokenCount = 0
-    const draftSystem = loadPrompt('generation-system')
-    const draftStart = Date.now()
-
-    // Stream the response
-    for await (const chunk of llmService.generate({
-      systemPrompt: draftSystem,
-      userPrompt: prompt,
-      maxTokens: 4000,
-      temperature: 0.8,
-    })) {
-      fullContent += chunk
-      tokenCount += Math.ceil(chunk.length / 4)
-
-      res.write(`data: ${JSON.stringify({ type: 'chunk', content: chunk, tokenCount })}\n\n`)
-
-      // Save checkpoint every ~500 tokens
-      if (tokenCount % 500 < 10 && fullContent.length > 0) {
-        await saveCheckpoint(chapterId, fullContent, 'DRAFT')
-      }
-    }
-
-    await logGeneration({
-      chapterId, passType: 'DRAFT',
-      tokensIn: promptTokens(draftSystem, prompt),
-      tokensOut: countTokens(fullContent),
-      durationMs: Date.now() - draftStart,
-    })
-
-    // Final save
-    const versionId = await saveCheckpoint(chapterId, fullContent, 'DRAFT')
-    await db.update(chapters)
-      .set({ 
-        wordCount: fullContent.split(/\s+/).filter(w => w.length > 0).length,
-        status: 'draft',
-        updatedAt: new Date().toISOString()
-      })
-      .where(eq(chapters.id, chapterId))
-
-    res.write(`data: ${JSON.stringify({ type: 'complete', versionId, wordCount: fullContent.split(/\s+/).filter(w => w.length > 0).length })}\n\n`)
-    res.end()
-  } catch (error) {
-    console.error('Error generating draft:', error)
-    res.write(`data: ${JSON.stringify({ type: 'error', message: 'Generation failed' })}\n\n`)
-    res.end()
-  }
-})
-
-// GET /projects/:projectId/chapters/:chapterId/generate/style - Stream style pass
-router.get('/projects/:projectId/chapters/:chapterId/generate/style', async (req, res) => {
-  try {
-    const { projectId, chapterId } = req.params
-    const { styleProfileId } = req.query
-
-    if (!styleProfileId) {
-      return res.status(400).json({ error: 'Style profile required' })
-    }
-
-    const chapter = await db.select().from(chapters).where(eq(chapters.id, chapterId)).get()
-    if (!chapter) return res.status(404).json({ error: 'Chapter not found' })
-
-    // Get latest draft version
-    const latestVersion = await db.select()
-      .from(chapterVersions)
-      .where(eq(chapterVersions.chapterId, chapterId))
-      .orderBy(chapterVersions.createdAt)
-      .all()
-      .then(versions => versions[versions.length - 1])
-
-    if (!latestVersion) {
-      return res.status(400).json({ error: 'No draft content to style' })
-    }
-
-    const profile = await db.select().from(styleProfiles).where(eq(styleProfiles.id, styleProfileId as string)).get()
-    if (!profile?.extractedProfile) {
-      return res.status(400).json({ error: 'Style profile not found or not extracted' })
-    }
-
-    const parsed = JSON.parse(profile.extractedProfile)
-
-    // Set up SSE
-    res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
-    res.setHeader('Connection', 'keep-alive')
-
-    const template = loadPrompt('style-pass')
-    const prompt = substituteTemplate(template, {
-      sentenceLength: parsed.sentenceLengthTendency,
-      metaphorDensity: parsed.metaphorDensity,
-      vocabulary: parsed.vocabularyRegister,
-      pacing: parsed.pacingRhythm,
-      dialogueRatio: parsed.dialogueToNarrationRatio.toString(),
-      descriptionDensity: parsed.descriptionDensity,
-      povIntimacy: parsed.povIntimacy,
-      internalMonologue: parsed.internalMonologue,
-      notes: parsed.notes || '',
-      draft: latestVersion.content,
-    })
-
-    let fullContent = ''
-    const styleSystem = loadPrompt('generation-system')
-    const styleStart = Date.now()
-
-    for await (const chunk of llmService.generate({
-      systemPrompt: styleSystem,
-      userPrompt: prompt,
-      maxTokens: 4000,
-      temperature: 0.7,
-    })) {
-      fullContent += chunk
-      res.write(`data: ${JSON.stringify({ type: 'chunk', content: chunk })}\n\n`)
-
-      if (fullContent.length % 2000 < 100 && fullContent.length > 0) {
-        await saveCheckpoint(chapterId, fullContent, 'STYLE')
-      }
-    }
-
-    await logGeneration({
-      chapterId, passType: 'STYLE',
-      tokensIn: promptTokens(styleSystem, prompt),
-      tokensOut: countTokens(fullContent),
-      durationMs: Date.now() - styleStart,
-    })
-
-    const versionId = await saveCheckpoint(chapterId, fullContent, 'STYLE')
-    await db.update(chapters)
-      .set({ 
-        wordCount: fullContent.split(/\s+/).filter(w => w.length > 0).length,
-        status: 'style',
-        updatedAt: new Date().toISOString()
-      })
-      .where(eq(chapters.id, chapterId))
-
-    res.write(`data: ${JSON.stringify({ type: 'complete', versionId })}\n\n`)
-    res.end()
-  } catch (error) {
-    console.error('Error generating style pass:', error)
-    res.write(`data: ${JSON.stringify({ type: 'error', message: 'Style pass failed' })}\n\n`)
-    res.end()
-  }
-})
 
 // === Unified outline → draft → final pipeline (issues #7, #8, #9) ============
 //
@@ -978,7 +609,7 @@ router.post('/projects/:projectId/chapters/:chapterId/analyze', async (req, res)
         .where(eq(chapterVersions.chapterId, chapterId))
         .orderBy(chapterVersions.createdAt)
         .all()
-        .then(vs => vs[vs.length - 1]?.content)
+        .then(vs => pickBestVersion(vs)?.content)
     }
     if (!content) return res.status(400).json({ error: 'Chapter content required' })
 
@@ -989,13 +620,6 @@ router.post('/projects/:projectId/chapters/:chapterId/analyze', async (req, res)
     res.status(500).json({ error: 'Failed to analyze chapter' })
   }
 })
-
-// Persist a generation pass. Upserts the single row for the stage (STYLE counts
-// as FINAL) so streaming checkpoints and re-generation never pile up rows.
-async function saveCheckpoint(chapterId: string, content: string, passType: string): Promise<string> {
-  const stage = passType === 'STYLE' ? 'FINAL' : passType
-  return upsertStageVersion(chapterId, content, stage)
-}
 
 // POST /projects/:projectId/chapters/:chapterId/finalize - Finalize chapter with snapshot
 router.post('/projects/:projectId/chapters/:chapterId/finalize', async (req, res) => {
@@ -1009,7 +633,7 @@ router.post('/projects/:projectId/chapters/:chapterId/finalize', async (req, res
       .where(eq(chapterVersions.chapterId, chapterId))
       .orderBy(chapterVersions.createdAt)
       .all()
-      .then(versions => versions[versions.length - 1])
+      .then(versions => pickBestVersion(versions))
 
     if (!latestVersion) {
       return res.status(400).json({ error: 'No chapter content to finalize' })

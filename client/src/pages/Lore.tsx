@@ -3,11 +3,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { loreApi, charactersApi, locationsApi, LoreEntry, Character, Location } from '../api/api'
 import { findEntityLinks, renderTextWithLinks, LinkedEntity } from '../utils/crossReference'
-
-function errorDetail(error: unknown, fallback: string): string {
-  const e = error as { response?: { data?: { details?: string; error?: string } } }
-  return e?.response?.data?.details || e?.response?.data?.error || fallback
-}
+import { errorDetail } from '../utils/errors'
 
 export default function LorePage() {
   const { projectId } = useParams<{ projectId: string }>()
