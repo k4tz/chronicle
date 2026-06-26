@@ -52,6 +52,10 @@ router.post('/projects/:projectId/kb', async (req, res) => {
     const { projectId } = req.params
     const entry = req.body
 
+    if (!entry?.layer || !entry?.entityType || !entry?.content) {
+      return res.status(400).json({ error: 'KB entry requires layer, entityType, and content' })
+    }
+
     const result = await kbService.upsert({
       ...entry,
       projectId,
@@ -63,29 +67,9 @@ router.post('/projects/:projectId/kb', async (req, res) => {
   }
 })
 
-// GET /api/projects/:projectId/context - Get assembled context for chapter
-router.get('/projects/:projectId/context', async (req, res) => {
-  try {
-    const { projectId } = req.params
-    const { chapterId, chapterNumber } = req.query
-
-    // Parse chapter context from query params
-    const chapterContext = {
-      chapterId: chapterId as string,
-      chapterNumber: parseInt(chapterNumber as string) || 1,
-      relevantCharacterIds: (req.query.charIds as string)?.split(',') || [],
-      relevantLocationIds: (req.query.locIds as string)?.split(',') || [],
-      relevantThreadIds: (req.query.threadIds as string)?.split(',') || [],
-      recentChapterIds: [],
-    }
-
-    const context = await kbService.getActiveContext(projectId, chapterContext)
-    res.json(context)
-  } catch (error) {
-    console.error('Error assembling context:', error)
-    res.status(500).json({ error: 'Failed to assemble context' })
-  }
-})
+// NOTE: GET /projects/:projectId/context is served by routes/context.ts using the
+// richer ContextAssemblyEngine (tiers + ideas + snapshots). It used to be duplicated
+// here with a simpler implementation; removed so there is a single source of truth.
 
 // POST /api/projects/:projectId/kb/evolve - Trigger KB evolution from chapter
 router.post('/projects/:projectId/kb/evolve', async (req, res) => {

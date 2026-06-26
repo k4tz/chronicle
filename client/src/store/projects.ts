@@ -1,17 +1,30 @@
 // client/src/store/projects.ts
 import { create } from 'zustand'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { createContext, useContext, useState, useEffect, ReactNode, createElement } from 'react'
 import { apiClient, Project, ProjectWithRelations, CreateProjectInput } from '../api/client'
+
+const STORAGE_KEY = 'selectedProjectId'
 
 interface ProjectsStore {
   selectedProjectId: string | null
   setSelectedProjectId: (id: string | null) => void
 }
 
+const initialSelectedProjectId =
+  typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null
+
+// Single source of truth for the active project. Persisted to localStorage so a
+// page reload (or navigating to a route without a :projectId param) keeps the
+// sidebar populated.
 export const useProjectsStore = create<ProjectsStore>((set) => ({
-  selectedProjectId: null,
-  setSelectedProjectId: (id) => set({ selectedProjectId: id }),
+  selectedProjectId: initialSelectedProjectId,
+  setSelectedProjectId: (id) => {
+    if (typeof localStorage !== 'undefined') {
+      if (id) localStorage.setItem(STORAGE_KEY, id)
+      else localStorage.removeItem(STORAGE_KEY)
+    }
+    set({ selectedProjectId: id })
+  },
 }))
 
 export function useProjects() {
@@ -35,6 +48,29 @@ export function useProject(id: string | null) {
   })
 }
 
+// A plausible full Project row for optimistic inserts (replaced by the real row
+// on settle). Mirrors the server's create defaults.
+function optimisticProject(data: CreateProjectInput): Project {
+  const now = new Date().toISOString()
+  return {
+    id: `optimistic-${now}`,
+    title: data.title,
+    logline: data.logline ?? null,
+    genre: data.genre ?? null,
+    tone: data.tone ?? null,
+    contentRating: data.contentRating ?? 'general',
+    pov: data.pov ?? 'third-limited',
+    targetWordCount: data.targetWordCount ?? 100000,
+    currentWordCount: 0,
+    recentChaptersCount: 3,
+    minRecentChapters: 1,
+    maxRecentChapters: 5,
+    minWordCountPerChapter: 2000,
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
 export function useCreateProject() {
   const queryClient = useQueryClient()
 
@@ -43,7 +79,17 @@ export function useCreateProject() {
       const response = await apiClient.post<Project>('/projects', data)
       return response.data
     },
-    onSuccess: () => {
+    // Optimistic: show the new project in the list immediately, roll back on error.
+    onMutate: async (data) => {
+      await queryClient.cancelQueries({ queryKey: ['projects'] })
+      const previous = queryClient.getQueryData<Project[]>(['projects'])
+      queryClient.setQueryData<Project[]>(['projects'], (old) => [...(old || []), optimisticProject(data)])
+      return { previous }
+    },
+    onError: (_err, _data, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(['projects'], ctx.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
     },
   })
@@ -57,46 +103,19 @@ export function useDeleteProject() {
       const response = await apiClient.delete(`/projects/${id}`)
       return response.data
     },
-    onSuccess: () => {
+    // Optimistic: remove the row immediately so the list doesn't wait on the
+    // round-trip; restore it if the delete fails.
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ['projects'] })
+      const previous = queryClient.getQueryData<Project[]>(['projects'])
+      queryClient.setQueryData<Project[]>(['projects'], (old) => (old || []).filter((p) => p.id !== id))
+      return { previous }
+    },
+    onError: (_err, _id, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(['projects'], ctx.previous)
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] })
     },
   })
-}
-
-export const ProjectsContext = createContext<{
-  selectedProjectId: string | null
-  setSelectedProjectId: (id: string | null) => void
-}>({
-  selectedProjectId: null,
-  setSelectedProjectId: () => {},
-})
-
-export function ProjectsProvider({ children }: { children: ReactNode }) {
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-
-  useEffect(() => {
-    const saved = localStorage.getItem('selectedProjectId')
-    if (saved) {
-      setSelectedProjectId(saved)
-    }
-  }, [])
-
-  const handleSetSelectedProjectId = (id: string | null) => {
-    setSelectedProjectId(id)
-    if (id) {
-      localStorage.setItem('selectedProjectId', id)
-    } else {
-      localStorage.removeItem('selectedProjectId')
-    }
-  }
-
-  return createElement(ProjectsContext.Provider, { value: { selectedProjectId, setSelectedProjectId: handleSetSelectedProjectId } }, children)
-}
-
-export function useProjectsContext() {
-  const context = useContext(ProjectsContext)
-  if (!context) {
-    throw new Error('useProjectsContext must be used within a ProjectsProvider')
-  }
-  return context
 }

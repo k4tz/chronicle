@@ -32,3 +32,8 @@ export class LruCacheService implements CacheService {
     this.cache.clear()
   }
 }
+
+// Shared singleton, used by the context engine to cache LLM-summarized
+// compression (keyed by content hash) so we don't re-summarize identical
+// passages on every generation pass.
+export const cacheService = new LruCacheService()

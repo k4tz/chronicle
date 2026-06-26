@@ -56,29 +56,29 @@ export default function RelationshipGraph({ characters, relationships }: Relatio
 
   if (characters.length === 0) {
     return (
-      <div className="flex items-center justify-center h-96 bg-gray-100 rounded-lg">
-        <p className="text-gray-500">Add characters to see the relationship graph</p>
+      <div className="flex items-center justify-center h-96 bg-gray-100 dark:bg-gray-800 rounded-lg">
+        <p className="text-gray-500 dark:text-gray-400">Add characters to see the relationship graph</p>
       </div>
     )
   }
 
   if (relationships.length === 0) {
     return (
-      <div className="flex items-center justify-center h-96 bg-gray-100 rounded-lg">
-        <p className="text-gray-500">Add relationships between characters to visualize them</p>
+      <div className="flex items-center justify-center h-96 bg-gray-100 dark:bg-gray-800 rounded-lg">
+        <p className="text-gray-500 dark:text-gray-400">Add relationships between characters to visualize them</p>
       </div>
     )
   }
 
   return (
-    <div className="border rounded-lg overflow-hidden bg-white">
-      <div className="px-4 py-2 bg-gray-50 border-b flex items-center justify-between">
-        <h3 className="font-semibold text-gray-700">Relationship Graph</h3>
+    <div className="border dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800">
+      <div className="px-4 py-2 bg-gray-50 dark:bg-gray-700 border-b dark:border-gray-700 flex items-center justify-between">
+        <h3 className="font-semibold text-gray-700 dark:text-gray-200">Relationship Graph</h3>
         <div className="flex gap-2 text-xs">
           {Object.entries(typeColors).map(([type, color]) => (
             <span key={type} className="flex items-center gap-1">
               <span className="w-3 h-3 rounded-full" style={{ backgroundColor: color }} />
-              <span className="capitalize text-gray-600">{type}</span>
+              <span className="capitalize text-gray-600 dark:text-gray-400">{type}</span>
             </span>
           ))}
         </div>

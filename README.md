@@ -1,8 +1,11 @@
 # Chronicle
 
-**Long-form novel writing app powered by local LLMs.**
+**A worldbuilding & consistency copilot for long-form novels, powered by local LLMs.**
 
-Target: 200,000–400,000 word novels. Text stories only. Local-first.
+You write; Chronicle remembers your world, tracks every character and plot thread, and flags
+continuity slips across the whole book. AI can draft, outline, and infer chapter state when you
+want it to — but the author stays in control. Target: 200,000–400,000 word novels. Text stories
+only. Local-first.
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)

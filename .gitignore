@@ -2,6 +2,10 @@
 node_modules/
 **/node_modules/
 
+# Downloaded HuggingFace / transformers.js model cache
+.cache/
+**/.cache/
+
 # Build outputs
 dist/
 **/dist/

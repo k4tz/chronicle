@@ -1,5 +1,6 @@
 // server/src/services/ideasService.ts
 import { db, eq } from '../db'
+import { or, isNull } from 'drizzle-orm'
 import { ideas } from '../db/schema'
 import { nanoid } from 'nanoid'
 
@@ -30,15 +31,12 @@ export class IdeasService {
    * then falling back to global/top-level ideas
    */
   async getIdeasForCategory(projectId: string, category: string): Promise<IdeaRecord[]> {
-    const allIdeas = await db
+    // Project-specific and global ideas only
+    const relevantIdeas = await db
       .select()
       .from(ideas)
+      .where(or(eq(ideas.projectId, projectId), isNull(ideas.projectId)))
       .all()
-
-    // Filter to project-specific and global ideas
-    const relevantIdeas = allIdeas.filter(idea => 
-      idea.projectId === projectId || idea.projectId === null
-    )
 
     // Filter by category and sort: project-specific first, then global
     const categoryIdeas = relevantIdeas.filter(idea => {
@@ -234,21 +232,16 @@ export class IdeasService {
    * Get all ideas for a project (including global)
    */
   async getAllIdeas(projectId?: string): Promise<IdeaRecord[]> {
-    const allIdeas = await db
+    const whereClause = projectId
+      ? or(eq(ideas.projectId, projectId), isNull(ideas.projectId))
+      : isNull(ideas.projectId)
+
+    return await db
       .select()
       .from(ideas)
+      .where(whereClause)
       .orderBy(ideas.createdAt)
-      .all()
-
-    if (projectId) {
-      // Filter to project-specific and global ideas
-      return allIdeas.filter(idea => 
-        idea.projectId === projectId || idea.projectId === null
-      )
-    } else {
-      // Global ideas only
-      return allIdeas.filter(idea => idea.projectId === null)
-    }
+      .all() as IdeaRecord[]
   }
 
   /**

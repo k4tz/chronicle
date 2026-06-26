@@ -14,6 +14,27 @@ export interface TextWithLinks {
   links: LinkedEntity[]
 }
 
+function isBoundary(ch: string | undefined): boolean {
+  // Treat start/end of string and any non-alphanumeric char as a word boundary.
+  return ch === undefined || !/[a-z0-9]/i.test(ch)
+}
+
+/** Whole-word, case-insensitive occurrences of `termLower` within `textLower`. */
+function findOccurrences(textLower: string, termLower: string): number[] {
+  const out: number[] = []
+  if (termLower.length < 2) return out // skip 1-char names to avoid noise
+  let start = 0
+  while (true) {
+    const idx = textLower.indexOf(termLower, start)
+    if (idx === -1) break
+    if (isBoundary(textLower[idx - 1]) && isBoundary(textLower[idx + termLower.length])) {
+      out.push(idx)
+    }
+    start = idx + termLower.length
+  }
+  return out
+}
+
 /**
  * Finds all entity mentions in text and returns their positions
  */
@@ -26,83 +47,31 @@ export function findEntityLinks(
   const links: LinkedEntity[] = []
   const textLower = text.toLowerCase()
 
-  // Find character names
+  const addMatches = (term: string, id: string, type: LinkedEntity['type']) => {
+    const trimmed = term.trim()
+    if (!trimmed) return
+    for (const idx of findOccurrences(textLower, trimmed.toLowerCase())) {
+      links.push({ id, name: trimmed, type, start: idx, end: idx + trimmed.length })
+    }
+  }
+
+  // Characters (names + aliases)
   characters.forEach(char => {
-    const nameLower = char.name.toLowerCase()
-    let start = 0
-    while (true) {
-      const idx = textLower.indexOf(nameLower, start)
-      if (idx === -1) break
-      links.push({
-        id: char.id,
-        name: char.name,
-        type: 'character',
-        start: idx,
-        end: idx + char.name.length,
-      })
-      start = idx + char.name.length
-    }
-    // Also check aliases
+    addMatches(char.name, char.id, 'character')
     if (char.aliases) {
-      const aliases = char.aliases.split(',').map(a => a.trim())
-      aliases.forEach(alias => {
-        const aliasLower = alias.toLowerCase()
-        let start = 0
-        while (true) {
-          const idx = textLower.indexOf(aliasLower, start)
-          if (idx === -1) break
-          links.push({
-            id: char.id,
-            name: alias,
-            type: 'character',
-            start: idx,
-            end: idx + alias.length,
-          })
-          start = idx + alias.length
-        }
-      })
+      char.aliases.split(',').forEach(alias => addMatches(alias, char.id, 'character'))
     }
   })
 
-  // Find location names
-  locations.forEach(loc => {
-    const nameLower = loc.name.toLowerCase()
-    let start = 0
-    while (true) {
-      const idx = textLower.indexOf(nameLower, start)
-      if (idx === -1) break
-      links.push({
-        id: loc.id,
-        name: loc.name,
-        type: 'location',
-        start: idx,
-        end: idx + loc.name.length,
-      })
-      start = idx + loc.name.length
-    }
-  })
+  // Locations
+  locations.forEach(loc => addMatches(loc.name, loc.id, 'location'))
 
-  // Find lore entry titles
-  lore.forEach(entry => {
-    const titleLower = entry.title.toLowerCase()
-    let start = 0
-    while (true) {
-      const idx = textLower.indexOf(titleLower, start)
-      if (idx === -1) break
-      links.push({
-        id: entry.id,
-        name: entry.title,
-        type: 'lore',
-        start: idx,
-        end: idx + entry.title.length,
-      })
-      start = idx + titleLower.length
-    }
-  })
+  // Lore entry titles
+  lore.forEach(entry => addMatches(entry.title, entry.id, 'lore'))
 
-  // Sort by position and remove overlaps (prefer longer matches)
-  links.sort((a, b) => a.start - b.start || b.end - a.end - a.start + b.start)
-  
+  // Sort by position; on ties prefer the longer match
+  links.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start))
+
   const filtered: LinkedEntity[] = []
   let lastEnd = -1
   for (const link of links) {

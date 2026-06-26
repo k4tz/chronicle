@@ -125,6 +125,66 @@ export const foreshadowingEntries = sqliteTable('foreshadowing_entries', {
   status:              text('status').notNull().default('open'),    // open, resolved
 })
 
+// === Arc Planner (consolidates Story Arcs + Plot Threads + Foreshadowing) ===
+// A Major Arc is a narrative volume — a bounded span of chapters with a unified
+// thematic/plot purpose. It supersedes the thin `storyArcs` module: richer
+// narrative-intent fields + structured (JSON) selections, and it feeds the
+// chapter-generation pipeline with sub-arc-scoped context.
+// Convention: array-valued fields are JSON text columns defaulting to '[]'.
+export const majorArcs = sqliteTable('major_arcs', {
+  id:                text('id').primaryKey(),
+  projectId:         text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  title:             text('title').notNull(),
+  chapterStart:      integer('chapter_start').notNull().default(1),
+  chapterEnd:        integer('chapter_end').notNull().default(1),
+  status:            text('status').notNull().default('planned'),   // planned | in_progress | completed
+  orderIndex:        integer('order_index').notNull().default(0),
+  // Narrative-intent fields (short text)
+  centralConflict:   text('central_conflict'),
+  arcGoal:           text('arc_goal'),
+  openingState:      text('opening_state'),
+  closingState:      text('closing_state'),
+  toneKeywords:      text('tone_keywords').notNull().default('[]'),   // JSON string[]
+  // Structured selections (JSON)
+  characters:        text('characters').notNull().default('[]'),      // JSON CharacterRef[]
+  themes:            text('themes').notNull().default('[]'),          // JSON string[]
+  loreIntroduced:    text('lore_introduced').notNull().default('[]'), // JSON LoreRef[]
+  loreDeveloped:     text('lore_developed').notNull().default('[]'),  // JSON LoreRef[]
+  foreshadowingSeeds: text('foreshadowing_seeds').notNull().default('[]'), // JSON ForeshadowingSeed[]
+  generatedByLlm:    integer('generated_by_llm').notNull().default(0),
+  createdAt:         text('created_at').notNull(),
+  updatedAt:         text('updated_at').notNull(),
+})
+
+// A Sub-Arc is a narrative segment within a Major Arc (~3–10 chapters) with its
+// own mini-arc shape (setup → escalation → resolution). It is the unit the
+// chapter-generation pipeline reads per chapter (see contextAssemblyEngine).
+export const subArcs = sqliteTable('sub_arcs', {
+  id:                   text('id').primaryKey(),
+  projectId:            text('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  parentArcId:          text('parent_arc_id').notNull().references(() => majorArcs.id, { onDelete: 'cascade' }),
+  title:                text('title').notNull(),
+  chapterStart:         integer('chapter_start').notNull().default(1),
+  chapterEnd:           integer('chapter_end').notNull().default(1),
+  orderIndex:           integer('order_index').notNull().default(0),
+  plotProgression:      text('plot_progression').notNull().default('setup'), // setup | rising | climax | resolution
+  emotionalArc:         text('emotional_arc'),
+  pacingNotes:          text('pacing_notes'),
+  charactersInvolved:   text('characters_involved').notNull().default('[]'),   // JSON CharacterInvolvement[]
+  characterDevelopments: text('character_developments').notNull().default('[]'), // JSON CharacterDevelopment[]
+  plotPoints:           text('plot_points').notNull().default('[]'),           // JSON PlotPoint[] (with status)
+  unresolvedThreads:    text('unresolved_threads').notNull().default('[]'),    // JSON string[]
+  loreIntroduced:       text('lore_introduced').notNull().default('[]'),       // JSON LoreRef[]
+  loreDeveloped:        text('lore_developed').notNull().default('[]'),        // JSON LoreRef[]
+  loreRevealed:         text('lore_revealed').notNull().default('[]'),         // JSON LoreRef[]
+  foreshadowingPlanted: text('foreshadowing_planted').notNull().default('[]'), // JSON ForeshadowingSeed[]
+  foreshadowingPayoffs: text('foreshadowing_payoffs').notNull().default('[]'), // JSON ForeshadowingPayoff[]
+  closureSummary:       text('closure_summary'),                              // generated at sub-arc boundary
+  generatedByLlm:       integer('generated_by_llm').notNull().default(0),
+  createdAt:            text('created_at').notNull(),
+  updatedAt:            text('updated_at').notNull(),
+})
+
 export const ideas = sqliteTable('ideas', {
   id:             text('id').primaryKey(),
   projectId:      text('project_id').references(() => projects.id, { onDelete: 'cascade' }), // null = global/top-level

@@ -1,9 +1,21 @@
 // server/src/services/contextAssemblyEngine.ts
+import { createHash } from 'crypto'
 import { db, eq } from '../db'
 import {
   projects, characters, locations, storyArcs, plotThreads,
-  stateSnapshots, chapters, kbEntries, ideas, characterStates, locationStates
+  stateSnapshots, chapters, kbEntries, ideas, characterStates, locationStates,
+  loreEntries, worldFoundations
 } from '../db/schema'
+import { countTokens, truncateToSentence } from './tokenizer'
+import { cacheService } from './cacheService'
+import { llmService } from './llmService'
+import { rankByRelevance } from './retrieval'
+import { buildArcContextBlock, getArcPinnedEntities } from './arcPlannerService'
+import { kbService } from './kbService'
+
+// Per-field cap (chars) for the world-foundation block so a richly-seeded world
+// can't single-handedly blow the context budget but still always reaches the model.
+const WORLD_FIELD_CAP = 700
 
 export interface AssembledContext {
   tier1: string        // Core context (~1000 tokens)
@@ -29,18 +41,28 @@ export interface ContextParts {
 export interface ChapterContextConfig {
   chapterId?: string
   chapterNumber?: number
-  relevantCharacterIds?: string[]
-  relevantLocationIds?: string[]
-  relevantThreadIds?: string[]
+  relevantCharacterIds?: string[]   // pinned: always included
+  relevantLocationIds?: string[]    // pinned: always included
+  relevantThreadIds?: string[]      // pinned: always included
+  // Free text (the chapter outline / focus) used to rank and retrieve the most
+  // relevant characters/locations/lore when explicit IDs aren't pinned.
+  queryText?: string
   includeRecentChapters?: number  // How many recent chapters to include (overrides project setting)
   includeIdeas?: boolean  // Include linked ideas in context
 }
+
+// How many of each entity type relevance-retrieval may select (pinned items
+// are always included and count toward these caps). Budget compression handles
+// any remaining overflow.
+const MAX_CHARACTERS = 8
+const MAX_LOCATIONS = 6
+const MAX_LORE = 6
+const MAX_KB = 6
 
 export class ContextAssemblyEngine {
   // Token budget calculated from environment variables
   // Default: 8192 context window - 4096 headroom = 4096 tokens for context
   private readonly TOKEN_BUDGET: number
-  private readonly CHARS_PER_TOKEN = 4
 
   constructor() {
     // Read from environment or use defaults
@@ -65,6 +87,7 @@ export class ContextAssemblyEngine {
       relevantCharacterIds = [],
       relevantLocationIds = [],
       relevantThreadIds = [],
+      queryText = '',
       includeRecentChapters: requestedRecentChapters,
       includeIdeas = true,
     } = config
@@ -110,15 +133,35 @@ export class ContextAssemblyEngine {
     tier1Parts.push('=== STORY PREMISE ===')
     tier1Parts.push(premise)
 
-    // Active characters (names + one-line states)
+    // Relevance query: the chapter outline/focus, backed by the logline/title.
+    // Drives retrieval when explicit entity ids aren't pinned.
+    const relevanceQuery = [queryText, project.logline, project.title].filter(Boolean).join('\n')
+
+    // Pin the entities the author attached to this chapter's arc/sub-arc so they
+    // are ALWAYS included (full profile), not left to relevance retrieval. This
+    // is the fix for "added a character to the arc but it's ignored at gen time".
+    const arcPinned = await getArcPinnedEntities(projectId, chapterNumber)
+    const pinnedCharacterIds = [...new Set([...relevantCharacterIds, ...arcPinned.characterIds])]
+    const pinnedLoreIds = [...new Set(arcPinned.loreIds)]
+
+    // Characters: pinned ids always included; otherwise retrieve the most
+    // relevant to this chapter (was previously "only whatever ids were passed",
+    // which left the context empty for the draft pass that pins nothing).
     const allCharacters = await db
       .select()
       .from(characters)
       .where(eq(characters.projectId, projectId))
       .all()
 
-    const activeCharNames = allCharacters
-      .filter(c => relevantCharacterIds.includes(c.id))
+    const chapterCharacters = await this.selectRelevant(
+      relevanceQuery,
+      allCharacters,
+      (c) => [c.name, c.aliases, c.personality, c.motivation, c.background, c.abilities].filter(Boolean).join(' '),
+      pinnedCharacterIds,
+      MAX_CHARACTERS,
+    )
+
+    const activeCharNames = chapterCharacters
       .map(c => `- ${c.name}${c.motivation ? ` (${c.motivation})` : ''}`)
       .join('\n')
 
@@ -127,11 +170,46 @@ export class ContextAssemblyEngine {
       tier1Parts.push(activeCharNames)
     }
 
+    // Arc Planner guidance (sub-arc generation context for this chapter). It's
+    // the single most relevant steering signal — pending plot points, emotional
+    // arc, foreshadowing due, arc goal — so it lives in Tier 1 (never trimmed).
+    // Empty string when the project has no arc-planner data (graceful fallback).
+    const arcBlock = await buildArcContextBlock(projectId, chapterNumber)
+    if (arcBlock.trim()) {
+      tier1Parts.push('\n' + arcBlock)
+    }
+
     // Tier 2: Chapter-relevant full profiles
     const tier2Parts: string[] = []
 
-    // Full character profiles for relevant characters
-    const chapterCharacters = allCharacters.filter(c => relevantCharacterIds.includes(c.id))
+    // World foundation — the seeded canon (cosmology/history/geography/etc.).
+    // This was previously NEVER included in generation context, so the authored
+    // world had no influence on what the model wrote. Include it (per-field
+    // capped) so world data is actually used. Budget compression can trim it.
+    const world = await db
+      .select()
+      .from(worldFoundations)
+      .where(eq(worldFoundations.projectId, projectId))
+      .get()
+    if (world) {
+      const cap = (v: string | null) => (v ? truncateToSentence(v, Math.ceil(WORLD_FIELD_CAP / 4)) : null)
+      const worldLines: Array<string | null> = [
+        world.cosmology ? `Cosmology: ${cap(world.cosmology)}` : null,
+        world.history ? `History: ${cap(world.history)}` : null,
+        world.geography ? `Geography: ${cap(world.geography)}` : null,
+        world.politicalLandscape ? `Politics: ${cap(world.politicalLandscape)}` : null,
+        world.economy ? `Economy: ${cap(world.economy)}` : null,
+        world.culture ? `Culture: ${cap(world.culture)}` : null,
+        world.magicOrTechRules ? `Magic/Tech rules: ${cap(world.magicOrTechRules)}` : null,
+      ]
+      const worldBody = worldLines.filter(Boolean).join('\n')
+      if (worldBody.trim()) {
+        tier2Parts.push('=== WORLD FOUNDATION (canon) ===')
+        tier2Parts.push(worldBody)
+      }
+    }
+
+    // Full character profiles for the selected characters
     if (chapterCharacters.length > 0) {
       tier2Parts.push('=== CHARACTER PROFILES ===')
       for (const char of chapterCharacters) {
@@ -151,14 +229,20 @@ export class ContextAssemblyEngine {
       }
     }
 
-    // Full location profiles for relevant locations
+    // Full location profiles for the most relevant locations (pinned + retrieved)
     const allLocations = await db
       .select()
       .from(locations)
       .where(eq(locations.projectId, projectId))
       .all()
 
-    const chapterLocations = allLocations.filter(l => relevantLocationIds.includes(l.id))
+    const chapterLocations = await this.selectRelevant(
+      relevanceQuery,
+      allLocations,
+      (l) => [l.name, l.region, l.description, l.atmosphere, l.lore].filter(Boolean).join(' '),
+      relevantLocationIds,
+      MAX_LOCATIONS,
+    )
     if (chapterLocations.length > 0) {
       tier2Parts.push('\n=== LOCATION PROFILES ===')
       for (const loc of chapterLocations) {
@@ -171,6 +255,44 @@ export class ContextAssemblyEngine {
         ].filter(Boolean) as string[]
         tier2Parts.push(profile.join('\n'))
       }
+    }
+
+    // Relevant lore (newly surfaced — lore used to never reach the model).
+    const allLore = await db
+      .select()
+      .from(loreEntries)
+      .where(eq(loreEntries.projectId, projectId))
+      .all()
+
+    const chapterLore = await this.selectRelevant(
+      relevanceQuery,
+      allLore,
+      (l) => [l.title, l.category, l.content, l.tags].filter(Boolean).join(' '),
+      pinnedLoreIds,
+      MAX_LORE,
+    )
+    if (chapterLore.length > 0) {
+      tier2Parts.push('\n=== RELEVANT LORE ===')
+      for (const lore of chapterLore) {
+        tier2Parts.push(`\n## ${lore.title} (${lore.category})\n${lore.content}`)
+      }
+    }
+
+    // Evolved canon from the Knowledge Bank (facts merged in at finalize time via
+    // applyKBUpdates). These never reached generation context before, so KB
+    // evolution had no effect on later chapters. Surface the most relevant ones.
+    try {
+      const kbHits = (await kbService.search(projectId, relevanceQuery || project.title))
+        .filter(e => !e.entityType.endsWith('_version'))
+        .slice(0, MAX_KB)
+      if (kbHits.length > 0) {
+        tier2Parts.push('\n=== EVOLVED CANON (Knowledge Bank) ===')
+        for (const e of kbHits) {
+          tier2Parts.push(`- [${e.entityType}] ${truncateToSentence(e.content, 150)}`)
+        }
+      }
+    } catch (err) {
+      console.warn('KB context lookup failed (non-fatal):', (err as Error).message)
     }
 
     // Active plot threads
@@ -199,14 +321,17 @@ export class ContextAssemblyEngine {
         .where(eq(ideas.projectId, projectId))
         .all()
 
+      const selectedEntityIds = new Set<string>([
+        ...chapterCharacters.map(c => c.id),
+        ...chapterLocations.map(l => l.id),
+      ])
       const linkedIdeas: string[] = []
       for (const idea of allIdeas) {
         if (idea.linkedEntities) {
           try {
             const entities = JSON.parse(idea.linkedEntities)
             const isRelevant = entities.some((e: { entityId: string; entityType: string }) =>
-              relevantCharacterIds.includes(e.entityId) ||
-              relevantLocationIds.includes(e.entityId)
+              selectedEntityIds.has(e.entityId)
             )
             if (isRelevant) {
               linkedIdeas.push(`- **${idea.title}**: ${idea.description}`)
@@ -341,19 +466,27 @@ export class ContextAssemblyEngine {
     const tier2 = tier2Parts.join('\n')
     const tier3 = tier3Parts.join('\n')
 
-    const tier1Tokens = Math.ceil(tier1.length / this.CHARS_PER_TOKEN)
-    const tier2Tokens = Math.ceil(tier2.length / this.CHARS_PER_TOKEN)
-    const tier3Tokens = Math.ceil(tier3.length / this.CHARS_PER_TOKEN)
+    const tier1Tokens = countTokens(tier1)
+    const tier2Tokens = countTokens(tier2)
+    const tier3Tokens = countTokens(tier3)
     const totalTokens = tier1Tokens + tier2Tokens + tier3Tokens
 
-    // Check if we're within budget, compress if needed
+    // Check if we're within budget, compress if needed.
+    // Tier 1 (premise + active characters) is sacrosanct; compress Tier 3
+    // (recent narrative) first, then Tier 2 (chapter profiles) if still over.
     let finalTier2 = tier2
     let finalTier3 = tier3
 
     if (totalTokens > this.TOKEN_BUDGET) {
-      // Compress tier 3 first
-      const compressedTier3 = await this.compressText(tier3, this.TOKEN_BUDGET * 0.4 * this.CHARS_PER_TOKEN)
-      finalTier3 = compressedTier3
+      const overBy = totalTokens - this.TOKEN_BUDGET
+      const tier3Target = Math.max(200, tier3Tokens - overBy)
+      finalTier3 = await this.compressText(tier3, tier3Target)
+
+      const afterTier3 = tier1Tokens + tier2Tokens + countTokens(finalTier3)
+      if (afterTier3 > this.TOKEN_BUDGET) {
+        const tier2Target = Math.max(300, tier2Tokens - (afterTier3 - this.TOKEN_BUDGET))
+        finalTier2 = await this.compressText(tier2, tier2Target)
+      }
     }
 
     return {
@@ -361,9 +494,7 @@ export class ContextAssemblyEngine {
       tier2: finalTier2,
       tier3: finalTier3,
       tier4Available: true,  // KB lookup is available
-      totalTokens: Math.ceil(
-        (tier1.length + finalTier2.length + finalTier3.length) / this.CHARS_PER_TOKEN
-      ),
+      totalTokens: countTokens(tier1) + countTokens(finalTier2) + countTokens(finalTier3),
       parts: {
         premise,
         activeCharacters: activeCharNames,
@@ -378,11 +509,60 @@ export class ContextAssemblyEngine {
     }
   }
 
-  private async compressText(text: string, maxLength: number): Promise<string> {
-    // Simple compression: truncate and add ellipsis
-    // In production, this would call LLM to summarize
-    if (text.length <= maxLength) return text
-    return text.slice(0, maxLength - 100) + '\n\n[...compressed for brevity...]'
+  /**
+   * Choose which entities to include: pinned ids are always kept; if there's a
+   * relevance query and room remains, the most relevant of the rest (lexical or
+   * embedding cosine) are added up to maxCount. Returns items in priority order
+   * (pinned first, then by descending relevance).
+   */
+  private async selectRelevant<T extends { id: string }>(
+    query: string,
+    items: T[],
+    getText: (it: T) => string,
+    pinnedIds: string[],
+    maxCount: number,
+  ): Promise<T[]> {
+    if (items.length === 0) return []
+    const pinnedSet = new Set(pinnedIds)
+    const selected = items.filter((i) => pinnedSet.has(i.id))
+    const rest = items.filter((i) => !pinnedSet.has(i.id))
+
+    if (selected.length < maxCount && query.trim() && rest.length > 0) {
+      const ranked = await rankByRelevance(query, rest.map((it) => ({ item: it, text: getText(it) })))
+      for (const r of ranked) {
+        if (selected.length >= maxCount) break
+        if (r.score <= 0) break // no overlap with the query → not relevant
+        selected.push(r.item)
+      }
+    }
+    return selected
+  }
+
+  /**
+   * Compress text to fit a token budget. Prefers LLM summarization (cached by
+   * content hash so identical passages are summarized once), and falls back to
+   * sentence-boundary-aware truncation when the LLM is unavailable — never the
+   * old mid-sentence character slice that could cut canon in half.
+   */
+  private async compressText(text: string, maxTokens: number): Promise<string> {
+    if (countTokens(text) <= maxTokens) return text
+
+    const key = `compress:${maxTokens}:${createHash('sha1').update(text).digest('hex')}`
+    const cached = await cacheService.get<string>(key)
+    if (cached) return cached
+
+    try {
+      const summary = await llmService.summarize(text, maxTokens)
+      const fitted = countTokens(summary) > maxTokens ? truncateToSentence(summary, maxTokens) : summary
+      if (fitted.trim()) {
+        await cacheService.set(key, fitted, 24 * 3600)
+        return fitted
+      }
+    } catch (err) {
+      console.warn('LLM compression failed, using sentence-aware truncation:', (err as Error).message)
+    }
+
+    return truncateToSentence(text, maxTokens)
   }
 
   // Get KB entry for on-demand lookup

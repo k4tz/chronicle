@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { locationsApi, Location } from '../api/api'
+import { errorDetail } from '../utils/errors'
 
 export default function LocationsPage() {
   const { projectId } = useParams<{ projectId: string }>()
@@ -11,6 +12,10 @@ export default function LocationsPage() {
   const [locations, setLocations] = useState<Location[]>([])
   const [showForm, setShowForm] = useState(false)
   const [editingLoc, setEditingLoc] = useState<Location | null>(null)
+  const [showGenerate, setShowGenerate] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [genStatus, setGenStatus] = useState<{ kind: 'error' | 'success'; msg: string } | null>(null)
+  const [genData, setGenData] = useState({ type: '', purpose: '', atmosphere: '' })
   const [formData, setFormData] = useState<Partial<Location>>({
     name: '',
     region: '',
@@ -53,6 +58,24 @@ export default function LocationsPage() {
     }
   }
 
+  const handleGenerate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!projectId) return
+    setGenerating(true)
+    setGenStatus(null)
+    try {
+      const { location } = await locationsApi.generate(projectId, genData)
+      setGenData({ type: '', purpose: '', atmosphere: '' })
+      loadLocations()
+      setGenStatus({ kind: 'success', msg: `Generated "${location.name}".` })
+    } catch (error) {
+      console.error('Failed to generate location:', error)
+      setGenStatus({ kind: 'error', msg: errorDetail(error, 'Generation failed. Is the model server reachable?') })
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   const handleEdit = (loc: Location) => {
     setEditingLoc(loc)
     setFormData({
@@ -90,6 +113,12 @@ export default function LocationsPage() {
             ← Back to Project
           </button>
           <button
+            onClick={() => setShowGenerate(!showGenerate)}
+            className="px-6 py-2 bg-purple-600 text-white rounded hover:bg-purple-700"
+          >
+            ✨ AI Generate
+          </button>
+          <button
             onClick={() => { setShowForm(!showForm); setEditingLoc(null); setFormData({ name: '', region: '', description: '', atmosphere: '', lore: '', currentState: '' }) }}
             className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
           >
@@ -97,6 +126,38 @@ export default function LocationsPage() {
           </button>
         </div>
       </div>
+
+      {showGenerate && (
+        <form onSubmit={handleGenerate} className="mb-8 bg-gray-800 p-6 rounded-lg border border-purple-500/40">
+          <h2 className="text-lg font-semibold mb-3 text-gray-100">AI Location Generator</h2>
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Type *</label>
+              <input type="text" value={genData.type} onChange={(e) => setGenData({ ...genData, type: e.target.value })}
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="e.g., Ancient ruin, Capital city" required />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Purpose</label>
+              <input type="text" value={genData.purpose} onChange={(e) => setGenData({ ...genData, purpose: e.target.value })}
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="e.g., Site of the final battle" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Atmosphere</label>
+              <input type="text" value={genData.atmosphere} onChange={(e) => setGenData({ ...genData, atmosphere: e.target.value })}
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="e.g., Eerie, foreboding" />
+            </div>
+          </div>
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <p className={`text-sm ${genStatus?.kind === 'error' ? 'text-red-400' : 'text-green-400'}`} aria-live="polite">
+              {generating ? 'The model is building a location — this can take a minute…' : genStatus?.msg || ''}
+            </p>
+            <button type="submit" disabled={generating || !genData.type}
+              className="px-6 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 shrink-0">
+              {generating ? 'Generating...' : 'Generate Location'}
+            </button>
+          </div>
+        </form>
+      )}
 
       {showForm && (
         <form onSubmit={handleSubmit} className="mb-8 bg-white p-6 rounded-lg shadow">

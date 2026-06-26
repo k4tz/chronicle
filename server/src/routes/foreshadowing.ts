@@ -26,6 +26,9 @@ router.post('/projects/:projectId/foreshadowing', async (req, res) => {
   try {
     const { projectId } = req.params
     const data = req.body
+    if (!data?.setup || typeof data.setup !== 'string' || !data.setup.trim()) {
+      return res.status(400).json({ error: 'Foreshadowing setup is required' })
+    }
     const id = nanoid()
 
     await db.insert(foreshadowingEntries).values({

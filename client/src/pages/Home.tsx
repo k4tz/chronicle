@@ -12,11 +12,15 @@ export default function HomePage() {
       {/* Hero Section */}
       <div className="mb-12 text-center">
         <h1 className="text-5xl font-bold mb-4 text-gray-900 dark:text-gray-100">
-          Welcome to Chronicle
+          Chronicle
         </h1>
-        <p className="text-xl text-gray-600 dark:text-gray-400 mb-8 max-w-2xl mx-auto">
-          Your AI-powered writing companion for long-form novels. 
-          Build worlds, develop characters, and write with intelligent assistance.
+        <p className="text-xl text-gray-600 dark:text-gray-400 mb-3 max-w-2xl mx-auto">
+          Your worldbuilding &amp; consistency copilot for long-form novels.
+        </p>
+        <p className="text-base text-gray-500 dark:text-gray-500 mb-8 max-w-2xl mx-auto">
+          You write. Chronicle remembers your world, tracks every character and thread,
+          and flags continuity slips — across 400k words. AI can draft when you want it to,
+          but you stay in the chair.
         </p>
         <div className="flex gap-4 justify-center">
           <button
@@ -42,14 +46,19 @@ export default function HomePage() {
           description="Build detailed worlds, characters, locations, and lore. Everything linked and organized for easy reference."
         />
         <FeatureCard
-          icon="✨"
-          title="AI Generation"
-          description="Generate chapters with AI assistance. Multi-pass workflow with outline, draft, style, and continuity checks."
+          icon="🛡️"
+          title="Continuity Guard"
+          description="Quality checks flag stale plot threads, unpaid foreshadowing, pacing outliers, and characters who've dropped off the page."
         />
         <FeatureCard
           icon="🔄"
-          title="Story Continuity"
-          description="Automatic state snapshots track character and world changes. Maintain consistency across 400k+ words."
+          title="Story Memory"
+          description="The AI infers each chapter's state snapshot with confidence scores — you confirm only the uncertain bits, instead of hand-filling forms."
+        />
+        <FeatureCard
+          icon="✨"
+          title="AI Assist (optional)"
+          description="When you want it: outline, draft, style, and continuity passes — grounded in the context Chronicle assembles. You can preview exactly what the model sees."
         />
         <FeatureCard
           icon="🎨"

@@ -62,48 +62,6 @@ export interface KBContext {
   worldChanges?: string[]    // from last snapshot
 }
 
-export interface AssembledContext {
-  tier1: string             // Core (~1000 tokens)
-  tier2: string             // Chapter-relevant (~3000 tokens)
-  tier3: string             // Recent narrative (~2000 tokens)
-  totalTokenEstimate: number
-}
-
-export interface ChapterContext {
-  chapterId: string
-  chapterNumber: number
-  relevantCharacterIds: string[]
-  relevantLocationIds: string[]
-  relevantThreadIds: string[]
-  recentChapterIds: string[] // last 3 chapters
-  snapshotData?: StateSnapshotData
-}
-
-export interface StateSnapshotData {
-  characterStates: Array<{
-    characterId: string
-    location: string
-    condition: string
-    emotionalState: string
-    activeGoals: string[]
-    newKnowledge: string[]
-  }>
-  locationStates: Array<{
-    locationId: string
-    currentOccupants: string[]
-    condition: string
-    activeEvents: string[]
-  }>
-  openThreads: Array<{
-    threadId: string
-    name: string
-    urgency: 1 | 2 | 3
-    lastDevelopment: string
-  }>
-  newCanonFacts: string[]
-  worldChanges: string[]
-}
-
 export interface CacheService {
   get<T>(key: string): Promise<T | null>
   set<T>(key: string, value: T, ttlSeconds?: number): Promise<void>
@@ -113,11 +71,15 @@ export interface CacheService {
 
 export interface LLMService {
   generate(req: GenerationRequest): AsyncGenerator<string>    // streaming
-  complete(req: GenerationRequest): Promise<string>           // single response
+  complete(req: GenerationRequest): Promise<string>           // single response prose
+  // Grammar-constrained JSON. Schema is passed to the model so output is forced
+  // to match; parsed robustly. Throws if nothing parseable comes back.
+  completeStructured<T = unknown>(req: GenerationRequest, schema: Record<string, any>, schemaName?: string): Promise<T>
   extractEntities(text: string, projectId: string): Promise<ExtractedEntities>
   checkConsistency(text: string, context: KBContext): Promise<ConsistencyFlag[]>
   extractStyleProfile(samples: string[]): Promise<StyleProfile>
   summarize(text: string, maxTokens: number): Promise<string>
+  embed(texts: string[]): Promise<number[][]>                 // vector embeddings (optional backend)
   listModels(): Promise<string[]>
 }
 
@@ -125,5 +87,4 @@ export interface KBService {
   search(projectId: string, query: string, layer?: 'PERMANENT' | 'PROGRESSIVE'): Promise<KBEntry[]>
   getByEntity(projectId: string, entityType: string, entityId: string): Promise<KBEntry[]>
   upsert(entry: Omit<KBEntry, 'id' | 'createdAt'>): Promise<KBEntry>
-  getActiveContext(projectId: string, chapterContext: ChapterContext): Promise<AssembledContext>
 }

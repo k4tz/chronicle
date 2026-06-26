@@ -1,14 +1,17 @@
 // client/src/api/client.ts
 import axios from 'axios'
 
-const API_BASE_URL = 'http://localhost:3001/api'
+// Configurable for deployment; defaults to the local dev server.
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api'
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 30000,
+  // Local LLM generation (outline, continuity check, style extraction, etc.) can
+  // take minutes; a 30s timeout aborted valid in-flight requests.
+  timeout: 300000,
 })
 
 // Health check

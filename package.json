@@ -11,6 +11,8 @@
     "build:server": "npm run build --prefix server",
     "build:client": "npm run build --prefix client",
     "start:server": "npm run start --prefix server",
+    "test": "node scripts/smoke-test.mjs",
+    "test:fast": "node scripts/smoke-test.mjs --skip-llm",
     "db:generate": "npm run db:generate --prefix server",
     "db:migrate": "npm run db:migrate --prefix server",
     "db:studio": "npm run db:studio --prefix server"

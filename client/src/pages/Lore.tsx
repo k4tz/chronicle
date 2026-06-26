@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { loreApi, charactersApi, locationsApi, LoreEntry, Character, Location } from '../api/api'
 import { findEntityLinks, renderTextWithLinks, LinkedEntity } from '../utils/crossReference'
+import { errorDetail } from '../utils/errors'
 
 export default function LorePage() {
   const { projectId } = useParams<{ projectId: string }>()
@@ -15,6 +16,10 @@ export default function LorePage() {
   const [editingEntry, setEditingEntry] = useState<LoreEntry | null>(null)
   const [formData, setFormData] = useState<Partial<LoreEntry>>({ title: '', category: '', content: '', tags: '' })
   const [showAutoLinks, setShowAutoLinks] = useState(true)
+  const [showGenerate, setShowGenerate] = useState(false)
+  const [generating, setGenerating] = useState(false)
+  const [genStatus, setGenStatus] = useState<{ kind: 'error' | 'success'; msg: string } | null>(null)
+  const [genData, setGenData] = useState({ topic: '', category: '', notes: '' })
 
   useEffect(() => { loadAllData() }, [projectId])
 
@@ -48,6 +53,24 @@ export default function LorePage() {
     } catch (error) {
       console.error('Failed to save lore:', error)
       alert('Failed to save lore entry')
+    }
+  }
+
+  const handleGenerate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!projectId) return
+    setGenerating(true)
+    setGenStatus(null)
+    try {
+      const { lore: created } = await loreApi.generate(projectId, genData)
+      setGenData({ topic: '', category: '', notes: '' })
+      loadAllData()
+      setGenStatus({ kind: 'success', msg: `Generated "${created.title}".` })
+    } catch (error) {
+      console.error('Failed to generate lore:', error)
+      setGenStatus({ kind: 'error', msg: errorDetail(error, 'Generation failed. Is the model server reachable?') })
+    } finally {
+      setGenerating(false)
     }
   }
 
@@ -93,6 +116,12 @@ export default function LorePage() {
             🔗 Auto-Links {showAutoLinks ? 'On' : 'Off'}
           </button>
           <button
+            onClick={() => setShowGenerate(!showGenerate)}
+            className="px-6 py-2 bg-purple-600 text-white rounded hover:bg-purple-700"
+          >
+            ✨ AI Generate
+          </button>
+          <button
             onClick={() => { setShowForm(!showForm); setEditingEntry(null); setFormData({ title: '', category: '', content: '', tags: '' }) }}
             className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
           >
@@ -100,6 +129,38 @@ export default function LorePage() {
           </button>
         </div>
       </div>
+
+      {showGenerate && (
+        <form onSubmit={handleGenerate} className="mb-8 bg-gray-800 p-6 rounded-lg border border-purple-500/40">
+          <h2 className="text-lg font-semibold mb-3 text-gray-100">AI Lore Generator</h2>
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Topic *</label>
+              <input type="text" value={genData.topic} onChange={(e) => setGenData({ ...genData, topic: e.target.value })}
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="e.g., The Sundering War" required />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Category</label>
+              <input type="text" value={genData.category} onChange={(e) => setGenData({ ...genData, category: e.target.value })}
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="event, artifact, religion…" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Notes</label>
+              <input type="text" value={genData.notes} onChange={(e) => setGenData({ ...genData, notes: e.target.value })}
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="any constraints or hooks" />
+            </div>
+          </div>
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <p className={`text-sm ${genStatus?.kind === 'error' ? 'text-red-400' : 'text-green-400'}`} aria-live="polite">
+              {generating ? 'The model is writing lore — this can take a minute…' : genStatus?.msg || ''}
+            </p>
+            <button type="submit" disabled={generating || !genData.topic}
+              className="px-6 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 shrink-0">
+              {generating ? 'Generating...' : 'Generate Lore'}
+            </button>
+          </div>
+        </form>
+      )}
 
       {showForm && (
         <form onSubmit={handleSubmit} className="mb-8 bg-white p-6 rounded-lg shadow">

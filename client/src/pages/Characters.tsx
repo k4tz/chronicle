@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { charactersApi, Character } from '../api/api'
-import { apiClient } from '../api/client'
+import { errorDetail } from '../utils/errors'
 
 export default function CharactersPage() {
   const { projectId } = useParams<{ projectId: string }>()
@@ -14,6 +14,7 @@ export default function CharactersPage() {
   const [editingChar, setEditingChar] = useState<Character | null>(null)
   const [showGenerate, setShowGenerate] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [genStatus, setGenStatus] = useState<{ kind: 'error' | 'success'; msg: string } | null>(null)
   const [genData, setGenData] = useState({ role: '', archetype: '', traits: '' })
   const [formData, setFormData] = useState<Partial<Character>>({
     name: '',
@@ -78,17 +79,15 @@ export default function CharactersPage() {
     e.preventDefault()
     if (!projectId) return
     setGenerating(true)
+    setGenStatus(null)
     try {
-      const response = await apiClient.post(`/projects/${projectId}/generate/character`, genData)
-      if (response.data.success) {
-        setShowGenerate(false)
-        setGenData({ role: '', archetype: '', traits: '' })
-        loadCharacters()
-        alert('Character generated!')
-      }
+      const { character } = await charactersApi.generate(projectId, genData)
+      setGenData({ role: '', archetype: '', traits: '' })
+      loadCharacters()
+      setGenStatus({ kind: 'success', msg: `Generated "${character.name}".` })
     } catch (error) {
       console.error('Failed to generate character:', error)
-      alert('Failed to generate character. Make sure Ollama is running.')
+      setGenStatus({ kind: 'error', msg: errorDetail(error, 'Generation failed. Is the model server reachable?') })
     } finally {
       setGenerating(false)
     }
@@ -160,28 +159,31 @@ export default function CharactersPage() {
       </div>
 
       {showGenerate && (
-        <form onSubmit={handleGenerate} className="mb-8 bg-purple-50 p-6 rounded-lg border border-purple-200">
-          <h2 className="text-lg font-semibold mb-3">AI Character Generator</h2>
+        <form onSubmit={handleGenerate} className="mb-8 bg-gray-800 p-6 rounded-lg border border-purple-500/40">
+          <h2 className="text-lg font-semibold mb-3 text-gray-100">AI Character Generator</h2>
           <div className="grid grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium mb-1">Role *</label>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Role *</label>
               <input type="text" value={genData.role} onChange={(e) => setGenData({ ...genData, role: e.target.value })}
-                className="w-full px-3 py-2 border rounded" placeholder="e.g., The reluctant hero" required />
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="e.g., The reluctant hero" required />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Archetype</label>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Archetype</label>
               <input type="text" value={genData.archetype} onChange={(e) => setGenData({ ...genData, archetype: e.target.value })}
-                className="w-full px-3 py-2 border rounded" placeholder="e.g., The mentor" />
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="e.g., The mentor" />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Key Traits</label>
+              <label className="block text-sm font-medium mb-1 text-gray-300">Key Traits</label>
               <input type="text" value={genData.traits} onChange={(e) => setGenData({ ...genData, traits: e.target.value })}
-                className="w-full px-3 py-2 border rounded" placeholder="e.g., Brave but impulsive" />
+                className="w-full px-3 py-2 border rounded bg-gray-700 border-gray-600 text-gray-100" placeholder="e.g., Brave but impulsive" />
             </div>
           </div>
-          <div className="mt-4 flex justify-end">
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <p className={`text-sm ${genStatus?.kind === 'error' ? 'text-red-400' : 'text-green-400'}`} aria-live="polite">
+              {generating ? 'The model is writing a character — this can take a minute…' : genStatus?.msg || ''}
+            </p>
             <button type="submit" disabled={generating || !genData.role}
-              className="px-6 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50">
+              className="px-6 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 shrink-0">
               {generating ? 'Generating...' : 'Generate Character'}
             </button>
           </div>

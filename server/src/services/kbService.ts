@@ -1,9 +1,40 @@
 // server/src/services/kbService.ts
 import { db, eq } from '../db'
-import { kbEntries, projects } from '../db/schema'
-import { KBService, KBEntry, AssembledContext, ChapterContext } from '../types/services'
-import { OllamaService } from './llmService'
+import { and, sql } from 'drizzle-orm'
+import { kbEntries } from '../db/schema'
+import { KBService, KBEntry } from '../types/services'
+import { llmService } from './llmService'
+import { KB_UPDATES_SCHEMA } from './schemas'
 import { nanoid } from 'nanoid'
+
+// === Full-text search (SQLite FTS5) ===
+// We commit to SQLite + FTS5 (see REBUILD-PLAN §A4). A standalone FTS5 virtual
+// table mirrors kb_entries.content; search() uses MATCH (ranked) when it's
+// available and falls back to a substring scan otherwise, so the app works even
+// on a SQLite build without FTS5. Rebuilt from scratch on startup, which keeps
+// it consistent and clears rows orphaned by project cascade-deletes.
+let ftsReady = false
+
+export async function initKbFts(): Promise<void> {
+  try {
+    await db.run(sql`CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(entry_id UNINDEXED, project_id UNINDEXED, entity_type, content)`)
+    await db.run(sql`DELETE FROM kb_fts`)
+    await db.run(sql`INSERT INTO kb_fts (entry_id, project_id, entity_type, content) SELECT id, project_id, entity_type, content FROM kb_entries`)
+    ftsReady = true
+    console.log('KB FTS5 index ready')
+  } catch (err) {
+    ftsReady = false
+    console.warn('FTS5 unavailable; KB search will use substring matching:', (err as Error).message)
+  }
+}
+
+// Turn an arbitrary user query into a safe FTS5 MATCH expression: alphanumeric
+// tokens, each as a prefix term, OR-joined. Returns null if nothing usable.
+function toMatchExpr(query: string): string | null {
+  const tokens = query.toLowerCase().match(/[\p{L}\p{N}]+/gu)
+  if (!tokens || tokens.length === 0) return null
+  return tokens.map(t => `"${t}"*`).join(' OR ')
+}
 
 export interface KBUpdate {
   entityType: string
@@ -26,41 +57,60 @@ export interface KBVersion {
 }
 
 export class KBServiceSQLite implements KBService {
-  private llmService: OllamaService
-
-  constructor() {
-    this.llmService = new OllamaService()
-  }
-
   async search(
     projectId: string,
     query: string,
     layer?: 'PERMANENT' | 'PROGRESSIVE'
   ): Promise<KBEntry[]> {
-    const conditions = [eq(kbEntries.projectId, projectId)]
-
-    if (layer) {
-      conditions.push(eq(kbEntries.layer, layer))
-    }
-
-    // Simple search - in production with FTS5, use MATCH operator
-    const results = await db
+    // All entries for the project (optionally layer-filtered). Used for the
+    // empty-query case (return everything) and as the FTS join source.
+    const all = await db
       .select()
       .from(kbEntries)
-      .where(conditions[0])
+      .where(layer
+        ? and(eq(kbEntries.projectId, projectId), eq(kbEntries.layer, layer))
+        : eq(kbEntries.projectId, projectId))
       .all()
 
-    // Filter by layer if specified
-    let filtered = layer ? results.filter(r => r.layer === layer) : results
+    const trimmed = query.trim()
+    if (!trimmed) return all.map(this.toKBEntry)
 
-    // Simple text search (case-insensitive)
-    const searchLower = query.toLowerCase()
-    filtered = filtered.filter(entry =>
-      entry.content.toLowerCase().includes(searchLower) ||
-      entry.entityType.toLowerCase().includes(searchLower)
-    )
+    // FTS5 ranked search: get matching entry ids, then return the corresponding
+    // rows in rank order (rows deleted since indexing simply drop out of the join).
+    const matchExpr = ftsReady ? toMatchExpr(trimmed) : null
+    if (matchExpr) {
+      try {
+        const ranked = await db.all<{ entry_id: string }>(
+          sql`SELECT entry_id FROM kb_fts WHERE project_id = ${projectId} AND kb_fts MATCH ${matchExpr} ORDER BY rank`
+        )
+        const byId = new Map(all.map(r => [r.id, r]))
+        const hits = ranked
+          .map(r => byId.get(r.entry_id))
+          .filter((r): r is typeof all[number] => Boolean(r))
+        return hits.map(this.toKBEntry)
+      } catch (err) {
+        console.warn('FTS5 search failed, falling back to substring:', (err as Error).message)
+      }
+    }
 
-    return filtered.map(this.toKBEntry)
+    // Substring fallback (case-insensitive over content + entity type).
+    const searchLower = trimmed.toLowerCase()
+    return all
+      .filter(entry =>
+        entry.content.toLowerCase().includes(searchLower) ||
+        entry.entityType.toLowerCase().includes(searchLower))
+      .map(this.toKBEntry)
+  }
+
+  // Keep the FTS index in sync with a single entry (delete-then-insert).
+  private async syncFts(id: string, projectId: string, entityType: string, content: string): Promise<void> {
+    if (!ftsReady) return
+    try {
+      await db.run(sql`DELETE FROM kb_fts WHERE entry_id = ${id}`)
+      await db.run(sql`INSERT INTO kb_fts (entry_id, project_id, entity_type, content) VALUES (${id}, ${projectId}, ${entityType}, ${content})`)
+    } catch (err) {
+      console.warn('FTS5 sync failed for entry', id, (err as Error).message)
+    }
   }
 
   async getByEntity(
@@ -90,12 +140,12 @@ export class KBServiceSQLite implements KBService {
     const id = crypto.randomUUID()
     const now = new Date().toISOString()
 
-    // Check if exists
+    // Check if exists (scoped to this project — entityId is not globally unique)
     const existing = entry.entityId
       ? await db
           .select()
           .from(kbEntries)
-          .where(eq(kbEntries.entityId, entry.entityId!))
+          .where(and(eq(kbEntries.projectId, entry.projectId), eq(kbEntries.entityId, entry.entityId!)))
           .get()
       : null
 
@@ -115,6 +165,7 @@ export class KBServiceSQLite implements KBService {
         .where(eq(kbEntries.id, existing.id))
         .get()
 
+      await this.syncFts(updated!.id, updated!.projectId, updated!.entityType, updated!.content)
       return this.toKBEntry(updated!)
     } else {
       await db.insert(kbEntries).values({
@@ -135,6 +186,7 @@ export class KBServiceSQLite implements KBService {
         .where(eq(kbEntries.id, id))
         .get()
 
+      await this.syncFts(created!.id, created!.projectId, created!.entityType, created!.content)
       return this.toKBEntry(created!)
     }
   }
@@ -190,19 +242,14 @@ Return a JSON array of updates:
 Only include updates with high confidence (70+). Be specific and concise.`
 
     try {
-      const response = await this.llmService.complete({
-        systemPrompt: 'You are a lore keeper tracking story evolution. Return ONLY valid JSON array.',
+      const updates = await llmService.completeStructured<KBUpdate[]>({
+        systemPrompt: 'You are a lore keeper tracking story evolution. Return ONLY a valid JSON array.',
         userPrompt: prompt,
         maxTokens: 3000,
         temperature: 0.3,
-      })
+      }, KB_UPDATES_SCHEMA, 'kb_updates')
 
-      // Extract JSON from response
-      const jsonMatch = response.match(/\[[\s\S]*\]/)
-      if (!jsonMatch) return []
-
-      const updates: KBUpdate[] = JSON.parse(jsonMatch[0])
-      return updates.filter(u => u.confidence >= 70)
+      return Array.isArray(updates) ? updates.filter(u => u.confidence >= 70) : []
     } catch (error) {
       console.error('Error analyzing chapter for KB updates:', error)
       return []
@@ -223,16 +270,14 @@ Only include updates with high confidence (70+). Be specific and concise.`
 
     for (const update of updates) {
       try {
-        // Find existing entry
+        // Find existing entry (scoped to this project)
         const existing = await db
           .select()
           .from(kbEntries)
-          .where(
-            eq(kbEntries.entityType, update.entityType)
-          )
+          .where(and(eq(kbEntries.projectId, projectId), eq(kbEntries.entityType, update.entityType)))
           .all()
-          .then(entries => entries.find(e => 
-            e.entityId === update.entityId || 
+          .then(entries => entries.find(e =>
+            e.entityId === update.entityId ||
             (e.entityId === null && update.entityId === null)
           ))
 
@@ -250,6 +295,7 @@ Only include updates with high confidence (70+). Be specific and concise.`
             version: 1,
             createdAt: new Date().toISOString(),
           })
+          await this.syncFts(id, projectId, update.entityType, update.newContent)
           applied++
           continue
         }
@@ -265,6 +311,7 @@ Only include updates with high confidence (70+). Be specific and concise.`
             version: (existing.version || 1) + 1,
           })
           .where(eq(kbEntries.id, existing.id))
+        await this.syncFts(existing.id, projectId, existing.entityType, mergedContent)
 
         // Create version record
         await db.insert(kbEntries).values({
@@ -314,88 +361,29 @@ Only include updates with high confidence (70+). Be specific and concise.`
    * Get version history for a KB entry
    */
   async getVersionHistory(entryId: string): Promise<KBVersion[]> {
-    const versions = await db
+    // Version records are PROGRESSIVE kb_entries whose entityId points back to
+    // the original entry and whose entityType ends in '_version'.
+    const rows = await db
       .select()
       .from(kbEntries)
-      .where(
-        eq(kbEntries.entityType, 'world_version')
-      )
+      .where(eq(kbEntries.entityId, entryId))
       .all()
 
-    return versions.map(v => ({
-      id: v.id,
-      entryId: v.entityId || '',
-      content: v.content,
-      changeSummary: v.content,
-      chapterId: '',
-      chapterNumber: 0,
-      createdAt: v.createdAt,
-    }))
-  }
-
-  async getActiveContext(
-    projectId: string,
-    chapterContext: ChapterContext
-  ): Promise<AssembledContext> {
-    // Tier 1: Core context (project premise, active characters)
-    const project = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .get()
-
-    const tier1Parts: string[] = []
-    if (project) {
-      tier1Parts.push(`Title: ${project.title}`)
-      if (project.logline) tier1Parts.push(`Logline: ${project.logline}`)
-      if (project.genre) tier1Parts.push(`Genre: ${project.genre}`)
-      if (project.tone) tier1Parts.push(`Tone: ${project.tone}`)
-      if (project.pov) tier1Parts.push(`POV: ${project.pov}`)
-    }
-
-    // Get character states for active characters
-    const activeCharIds = chapterContext.relevantCharacterIds
-    if (activeCharIds.length > 0) {
-      // This would need characterStates table - simplified for now
-      tier1Parts.push(`Active Characters: ${activeCharIds.join(', ')}`)
-    }
-
-    // Tier 2: Chapter-relevant KB entries
-    const tier2Parts: string[] = []
-    const relevantEntityTypes = ['character', 'location']
-    for (const entityType of relevantEntityTypes) {
-      const entries = await this.getByEntity(projectId, entityType)
-      for (const entry of entries) {
-        tier2Parts.push(`[${entry.entityType}:${entry.entityId || 'N/A'}] ${entry.content}`)
-      }
-    }
-
-    // Tier 3: Recent chapter summaries (from kbEntries with PROGRESSIVE layer)
-    const tier3Parts: string[] = []
-    const recentEntries = await db
-      .select()
-      .from(kbEntries)
-      .where(eq(kbEntries.projectId, projectId))
-      .all()
-
-    for (const entry of recentEntries.slice(-3)) {
-      tier3Parts.push(entry.compressedContent || entry.content)
-    }
-
-    const tier1 = tier1Parts.join('\n')
-    const tier2 = tier2Parts.join('\n\n')
-    const tier3 = tier3Parts.join('\n\n')
-
-    // Estimate tokens (1 token ≈ 4 chars)
-    const totalChars = tier1.length + tier2.length + tier3.length
-    const totalTokenEstimate = Math.ceil(totalChars / 4)
-
-    return {
-      tier1,
-      tier2,
-      tier3,
-      totalTokenEstimate,
-    }
+    return rows
+      .filter(v => v.entityType.endsWith('_version'))
+      .map(v => {
+        let parsed: any = {}
+        try { parsed = JSON.parse(v.content) } catch { /* legacy/plain content */ }
+        return {
+          id: v.id,
+          entryId: v.entityId || '',
+          content: parsed.newContent ?? v.content,
+          changeSummary: parsed.reason ?? '',
+          chapterId: '',
+          chapterNumber: parsed.chapterNumber ?? 0,
+          createdAt: v.createdAt,
+        }
+      })
   }
 
   private toKBEntry(row: any): KBEntry {

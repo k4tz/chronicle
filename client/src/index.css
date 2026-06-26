@@ -3,9 +3,10 @@
 @tailwind utilities;
 
 @layer base {
-  /* Default light mode */
+  /* Dark theme is permanent (html.dark is always set). Default the body dark so
+     there's no light flash before the stylesheet's .dark rules kick in. */
   body {
-    @apply bg-gray-50 text-gray-900;
+    @apply bg-gray-900 text-gray-100;
   }
 
   /* Dark mode overrides */
@@ -83,6 +84,23 @@
   .dark .border-gray-300 {
     @apply border-gray-700;
   }
+
+  /* Accent callout backgrounds that lack explicit dark: variants (e.g. the AI
+     Generate cards). The -50 shades are near-white panels; map them to dark
+     translucent tints. Elements that already declare a `dark:` variant win
+     because utilities are emitted after this base layer. */
+  .dark .bg-purple-50  { @apply bg-purple-900/20; }
+  .dark .bg-indigo-50  { @apply bg-indigo-900/20; }
+  .dark .bg-blue-50    { @apply bg-blue-900/20; }
+  .dark .bg-green-50   { @apply bg-green-900/20; }
+  .dark .bg-yellow-50  { @apply bg-yellow-900/20; }
+  .dark .bg-red-50     { @apply bg-red-900/20; }
+  .dark .border-purple-200 { @apply border-purple-800; }
+  .dark .border-indigo-200 { @apply border-indigo-800; }
+  .dark .border-blue-200   { @apply border-blue-800; }
+  .dark .border-green-200  { @apply border-green-800; }
+  .dark .border-yellow-200 { @apply border-yellow-800; }
+  .dark .border-red-200    { @apply border-red-800; }
 
   /* Hover states */
   .dark .hover\:bg-gray-50:hover {

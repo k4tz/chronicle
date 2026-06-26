@@ -1,13 +1,31 @@
 // server/src/routes/llm-generate.ts
 import { Router } from 'express'
-import { OllamaService } from '../services/llmService'
+import { llmService } from '../services/llmService'
+import type { GenerationRequest } from '../types/services'
+import { JsonSchema, WORLD_SCHEMA, CHARACTER_SCHEMA, LOCATION_SCHEMA, LORE_SCHEMA } from '../services/schemas'
 import { ideasService } from '../services/ideasService'
+import { loadPrompt, substituteTemplate } from '../services/promptTemplate'
 import { db, eq } from '../db'
-import { worldFoundations, characters, locations } from '../db/schema'
+import { worldFoundations, characters, locations, loreEntries } from '../db/schema'
 import { nanoid } from 'nanoid'
 
+// Compact world-foundation context used to ground entity generation so created
+// lore/locations stay consistent with the established world.
+async function buildWorldContext(projectId: string): Promise<string> {
+  const world = await db.select().from(worldFoundations).where(eq(worldFoundations.projectId, projectId)).get()
+  if (!world) return ''
+  const parts = [
+    world.cosmology && `Cosmology: ${world.cosmology}`,
+    world.history && `History: ${world.history}`,
+    world.geography && `Geography: ${world.geography}`,
+    world.politicalLandscape && `Politics: ${world.politicalLandscape}`,
+    world.culture && `Culture: ${world.culture}`,
+    world.magicOrTechRules && `Magic/Tech: ${world.magicOrTechRules}`,
+  ].filter(Boolean) as string[]
+  return parts.join('\n').slice(0, 3000)
+}
+
 const router = Router()
-const llmService = new OllamaService()
 
 // GET /api/llm/config - Get LLM configuration including context sizes
 router.get('/llm/config', (req, res) => {
@@ -20,44 +38,54 @@ router.get('/llm/config', (req, res) => {
   })
 })
 
-// Helper to extract JSON from LLM response (handles markdown code blocks)
-function extractJsonFromResponse(response: string): any {
-  const trimmed = response.trim()
-  
-  // First try to find JSON inside markdown code blocks
-  const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)```/g
-  let codeBlockMatch
-  while ((codeBlockMatch = codeBlockRegex.exec(trimmed)) !== null) {
-    try {
-      return JSON.parse(codeBlockMatch[1].trim())
-    } catch {}
-  }
-  
-  // Fallback: find the FIRST complete JSON object in response
-  // We need to find balanced braces, not just { ... }
-  let braceCount = 0
-  let startIndex = -1
-  
-  for (let i = 0; i < trimmed.length; i++) {
-    if (trimmed[i] === '{') {
-      if (braceCount === 0) startIndex = i
-      braceCount++
-    } else if (trimmed[i] === '}') {
-      braceCount--
-      if (braceCount === 0 && startIndex !== -1) {
-        // Found a complete JSON object
-        const candidate = trimmed.substring(startIndex, i + 1)
-        try {
-          return JSON.parse(candidate)
-        } catch {
-          // Try to continue looking for more
-          startIndex = -1
+// Coerce any LLM-returned value (string, array, or object) into a flat string.
+function normalizeString(val: any, defaultVal: string = ''): string {
+  if (val === null || val === undefined) return defaultVal
+  if (typeof val === 'string') return val.trim()
+  if (Array.isArray(val)) {
+    return val
+      .map(v => {
+        if (typeof v === 'string') return v.trim()
+        if (typeof v === 'object' && v !== null) {
+          return Object.entries(v).map(([k, v2]) => `${k}: ${v2}`).join(', ')
         }
-      }
+        return String(v)
+      })
+      .filter(Boolean)
+      .join(', ')
+  }
+  if (typeof val === 'object') {
+    try {
+      return Object.entries(val).map(([k, v]) => `${k}: ${v}`).join(', ')
+    } catch {
+      return JSON.stringify(val)
     }
   }
-  
-  throw new Error('No valid JSON found in response')
+  return String(val).trim()
+}
+
+// Grammar-constrained JSON with retry on transient errors (with backoff).
+// The schema forces valid output, so we mainly retry network/server hiccups.
+async function completeStructuredWithRetry<T>(
+  req: GenerationRequest,
+  schema: JsonSchema,
+  schemaName: string,
+  label: string,
+  maxRetries = 3,
+): Promise<T> {
+  let lastError: Error | null = null
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await llmService.completeStructured<T>(req, schema, schemaName)
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      console.warn(`${label} attempt ${attempt} failed:`, lastError.message)
+      if (attempt === maxRetries) throw lastError
+      // Exponential backoff before the next attempt
+      await new Promise(resolve => setTimeout(resolve, 500 * attempt))
+    }
+  }
+  throw lastError || new Error('No response from LLM')
 }
 
 // POST /api/projects/:projectId/generate/world - Generate world from seed
@@ -79,21 +107,18 @@ router.post('/projects/:projectId/generate/world', async (req, res) => {
       ? ideasService.formatIdeasForPrompt(allWorldIdeas)
       : ''
 
-    const systemPrompt = `Generate a detailed world for a novel. Return ONLY valid JSON with no other text:
-{"cosmology":"string","history":"string","geography":"string","politicalLandscape":"string","economy":"string","culture":"string","magicOrTechRules":"string"}
+    const systemPrompt = `Generate a detailed world for a novel. Return ONLY valid JSON with no other text. Keys (all strings): cosmology, history, geography, politicalLandscape, economy, culture, magicOrTechRules.
 
 Important: Do not include any thinking, reasoning, or explanation. Only output the JSON object.`
 
     const userPrompt = `Create a world based on: ${seed}${ideasContext ? '\n\n' + ideasContext : ''}`
 
-    const response = await llmService.complete({
+    const worldData = await completeStructuredWithRetry<Record<string, string>>({
       systemPrompt,
       userPrompt,
       maxTokens: 4000,
       temperature: 0.8,
-    })
-
-    const worldData = extractJsonFromResponse(response)
+    }, WORLD_SCHEMA, 'world', 'World generation')
 
     const existing = await db.select().from(worldFoundations).where(eq(worldFoundations.projectId, projectId)).get()
 
@@ -121,9 +146,10 @@ Important: Do not include any thinking, reasoning, or explanation. Only output t
       })
     }
 
-    // Mark ideas as used
+    // Mark ideas as used (reference the actual world foundation row)
+    const savedWorld = await db.select({ id: worldFoundations.id }).from(worldFoundations).where(eq(worldFoundations.projectId, projectId)).get()
     for (const idea of allWorldIdeas) {
-      await ideasService.markIdeaAsUsed(idea.id, { type: 'world', id: existing?.id || 'new' })
+      await ideasService.markIdeaAsUsed(idea.id, { type: 'world', id: savedWorld?.id || projectId })
     }
 
     res.json({ success: true, world: worldData, ideasUsed: allWorldIdeas.length })
@@ -166,44 +192,12 @@ Fantasy novel setting. Make them compelling with depth.`
 
     userPrompt += '\n\nAll values must be strings (no arrays). Use commas for lists.'
 
-    // Retry logic for transient LLM failures
-    let response: string | undefined
-    let lastError: Error | null = null
-    const maxRetries = 3
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        response = await llmService.complete({
-          systemPrompt,
-          userPrompt,
-          maxTokens: 2500,
-          temperature: 0.8,
-        })
-
-        // Check if response is empty or whitespace only
-        if (response && response.trim().length > 0) {
-          break // Success
-        }
-
-        lastError = new Error('Empty response from LLM')
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error))
-        console.warn(`Character generation attempt ${attempt} failed:`, lastError.message)
-
-        if (attempt === maxRetries) {
-          throw lastError
-        }
-
-        // Wait before retry (exponential backoff)
-        await new Promise(resolve => setTimeout(resolve, 500 * attempt))
-      }
-    }
-
-    if (!response) {
-      throw lastError || new Error('No response from LLM')
-    }
-
-    const charData = extractJsonFromResponse(response)
+    const charData = await completeStructuredWithRetry<Record<string, string>>({
+      systemPrompt,
+      userPrompt,
+      maxTokens: 2500,
+      temperature: 0.8,
+    }, CHARACTER_SCHEMA, 'character', 'Character generation')
 
     // Validate required fields
     if (!charData.name) {
@@ -212,34 +206,6 @@ Fantasy novel setting. Make them compelling with depth.`
 
     const id = nanoid()
     const now = new Date().toISOString()
-
-    // Helper to safely convert any value to string
-    const normalizeString = (val: any, defaultVal: string = ''): string => {
-      if (val === null || val === undefined) return defaultVal
-      if (typeof val === 'string') return val.trim()
-      if (Array.isArray(val)) {
-        return val
-          .map(v => {
-            if (typeof v === 'string') return v.trim()
-            if (typeof v === 'object' && v !== null) {
-              return Object.entries(v).map(([k, v2]) => `${k}: ${v2}`).join(', ')
-            }
-            return String(v)
-          })
-          .filter(Boolean)
-          .join(', ')
-      }
-      if (typeof val === 'object' && val !== null) {
-        try {
-          return Object.entries(val)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(', ')
-        } catch {
-          return JSON.stringify(val)
-        }
-      }
-      return String(val).trim()
-    }
 
     await db.insert(characters).values({
       id,
@@ -310,44 +276,12 @@ Fantasy novel setting. Make it vivid and immersive.`
 
     userPrompt += '\n\nAll values must be strings.'
 
-    // Retry logic for transient LLM failures
-    let response: string | undefined
-    let lastError: Error | null = null
-    const maxRetries = 3
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        response = await llmService.complete({
-          systemPrompt,
-          userPrompt,
-          maxTokens: 2000,
-          temperature: 0.8,
-        })
-
-        // Check if response is empty or whitespace only
-        if (response && response.trim().length > 0) {
-          break // Success
-        }
-
-        lastError = new Error('Empty response from LLM')
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error))
-        console.warn(`Location generation attempt ${attempt} failed:`, lastError.message)
-
-        if (attempt === maxRetries) {
-          throw lastError
-        }
-
-        // Wait before retry (exponential backoff)
-        await new Promise(resolve => setTimeout(resolve, 500 * attempt))
-      }
-    }
-
-    if (!response) {
-      throw lastError || new Error('No response from LLM')
-    }
-
-    const locData = extractJsonFromResponse(response)
+    const locData = await completeStructuredWithRetry<Record<string, string>>({
+      systemPrompt,
+      userPrompt,
+      maxTokens: 2000,
+      temperature: 0.8,
+    }, LOCATION_SCHEMA, 'location', 'Location generation')
 
     // Validate required fields
     if (!locData.name) {
@@ -356,34 +290,6 @@ Fantasy novel setting. Make it vivid and immersive.`
 
     const id = nanoid()
     const now = new Date().toISOString()
-
-    // Helper to safely convert any value to string
-    const normalizeString = (val: any, defaultVal: string = ''): string => {
-      if (val === null || val === undefined) return defaultVal
-      if (typeof val === 'string') return val.trim()
-      if (Array.isArray(val)) {
-        return val
-          .map(v => {
-            if (typeof v === 'string') return v.trim()
-            if (typeof v === 'object' && v !== null) {
-              return Object.entries(v).map(([k, v2]) => `${k}: ${v2}`).join(', ')
-            }
-            return String(v)
-          })
-          .filter(Boolean)
-          .join(', ')
-      }
-      if (typeof val === 'object' && val !== null) {
-        try {
-          return Object.entries(val)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(', ')
-        } catch {
-          return JSON.stringify(val)
-        }
-      }
-      return String(val).trim()
-    }
 
     await db.insert(locations).values({
       id,
@@ -414,6 +320,62 @@ Fantasy novel setting. Make it vivid and immersive.`
     console.error('Error generating location:', error)
     const errorMsg = error instanceof Error ? error.message : String(error)
     res.status(500).json({ error: 'Failed to generate location', details: errorMsg })
+  }
+})
+
+// POST /api/projects/:projectId/generate/lore - Generate a lore entry
+router.post('/projects/:projectId/generate/lore', async (req, res) => {
+  try {
+    const { projectId } = req.params
+    const { topic, category, notes } = req.body
+
+    if (!topic) return res.status(400).json({ error: 'Lore topic required' })
+
+    // Ground the entry in the established world + relevant ideas.
+    const worldContext = await buildWorldContext(projectId)
+    const loreIdeas = await ideasService.getIdeasForCategory(projectId, 'world')
+    const ideasContext = loreIdeas.length > 0 ? ideasService.formatIdeasForPrompt(loreIdeas.slice(0, 3)) : ''
+
+    const template = loadPrompt('lore-generation')
+    const userPrompt = substituteTemplate(template, {
+      topic,
+      category: category || 'any fitting category',
+      notes: notes || 'none',
+      worldContext: (worldContext + (ideasContext ? '\n\n' + ideasContext : '')) || 'No world foundation defined yet.',
+    })
+
+    const loreData = await completeStructuredWithRetry<Record<string, string>>({
+      systemPrompt: 'Output ONLY valid JSON. No other text, markdown, or explanation. Keys: title, category, content, tags (all strings).',
+      userPrompt,
+      maxTokens: 2000,
+      temperature: 0.85,
+    }, LORE_SCHEMA, 'lore', 'Lore generation')
+
+    if (!loreData.title || !loreData.content) {
+      throw new Error('Lore title and content are required')
+    }
+
+    const id = nanoid()
+    const now = new Date().toISOString()
+    await db.insert(loreEntries).values({
+      id,
+      projectId,
+      category: normalizeString(loreData.category, category || 'custom') || 'custom',
+      title: normalizeString(loreData.title, 'Untitled Lore'),
+      content: normalizeString(loreData.content),
+      tags: normalizeString(loreData.tags),
+      createdAt: now,
+      updatedAt: now,
+    })
+
+    const created = await db.select().from(loreEntries).where(eq(loreEntries.id, id)).get()
+    if (!created) throw new Error('Failed to retrieve created lore entry')
+
+    res.json({ success: true, lore: created })
+  } catch (error) {
+    console.error('Error generating lore:', error)
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    res.status(500).json({ error: 'Failed to generate lore', details: errorMsg })
   }
 })
 
